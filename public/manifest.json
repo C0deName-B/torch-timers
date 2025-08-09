@@ -1,13 +1,13 @@
 {
   "name": "Shadowdark Torch Timers",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "manifest_version": 1,
   "description": "Per-player torch/light countdowns visible to all.",
   "icon": "torch.svg",
   "action": {
     "title": "Torch Timers",
-    "icon": "/torch.svg",
-    "popover": "/index.html",
+    "icon": "torch.svg",
+    "popover": "index.html",
     "height": 440,
     "width": 420
   }
