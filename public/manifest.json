@@ -1,0 +1,13 @@
+{
+  "id": "com.brian.shadowdark-torches",
+  "version": "1.0.0",
+  "title": "Shadowdark Torch Timers",
+  "description": "Per-player torch/light countdowns visible to all.",
+  "action": {
+    "title": "Torch Timers",
+    "icon": "/torch.svg",
+    "popover": "/index.html",
+    "height": 440,
+    "width": 420
+  }
+}
