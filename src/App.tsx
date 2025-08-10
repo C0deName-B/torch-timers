@@ -31,6 +31,7 @@ const DEFAULT: TorchState = { durationMs: 60 * 60 * 1000, offsetMs: 0 };
 
 // === Time utilities ===
 function now() { return Date.now(); }
+
 function newId() {
   const g = globalThis as typeof globalThis;
   return g?.crypto?.randomUUID ? g.crypto.randomUUID() : `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -41,15 +42,17 @@ function getElapsed(s: TorchState): number {
   if (s.startAt && !s.pausedAt) return base + (now() - s.startAt);
   return base;
 }
+
 function getRemaining(s: TorchState): number { return Math.max(0, (s.durationMs ?? DEFAULT.durationMs) - getElapsed(s)); }
+
 function isRunning(s: TorchState) { return !!s.startAt && !s.pausedAt && getRemaining(s) > 0; }
+
 function format(ms: number) {
   const total = Math.ceil(ms / 1000);
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
-
 
 
 function isRoomTimer(value: unknown): value is RoomTimer {
@@ -67,7 +70,6 @@ function isRoomTimer(value: unknown): value is RoomTimer {
     (v.lightId === undefined || typeof v.lightId === "string")
   );
 }
-
 
 function isRoomTimerArray(value: unknown): value is RoomTimer[] { return Array.isArray(value) && value.every(isRoomTimer); }
 
@@ -104,6 +106,66 @@ function formatBadge(ms: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function Controls(props: {
+  minutes: number;
+  seconds: number;
+  name: string;
+  onMinutesChange: (m: number) => void;
+  onSecondsChange: (s: number) => void;
+  onNameChange: (n: string) => void;
+  onStart: () => Promise<void>;
+  onPause: () => Promise<void>;
+  onSetDuration: () => Promise<void>;
+}) {
+  const { minutes, seconds, name, onMinutesChange, onSecondsChange, onNameChange } = props;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* Row 1: buttons */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={props.onStart}>Start</button>
+        <button onClick={props.onPause}>Pause</button>
+        <button title="Add & Start new timer with duration" onClick={props.onSetDuration}>Set</button>
+      </div>
+
+      {/* Row 2: name + duration controls */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span>Name:</span>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => onNameChange(e.target.value)}
+          placeholder="e.g., Torch, Lantern, Light spell"
+          style={{ width: 200 }}
+          aria-label="Timer name"
+        />
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span>Duration:</span>
+        <input
+          type="number"
+          min={0}
+          value={minutes}
+          onChange={(e) => onMinutesChange(Math.max(0, parseInt(e.target.value || "0", 10)))}
+          style={{ width: 64 }}
+          aria-label="Minutes"
+        />
+        <span>min</span>
+
+        <input
+          type="number"
+          min={0}
+          max={59}
+          value={seconds}
+          onChange={(e) => onSecondsChange(Math.max(0, Math.min(59, parseInt(e.target.value || "0", 10))))}
+          style={{ width: 64 }}
+          aria-label="Seconds"
+        />
+        <span>sec</span>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
@@ -195,6 +257,7 @@ export default function App() {
   const offLocal = OBR.scene.local.onChange(async (items) => {
     const lights = items.filter((it: Item) => it.type === "LIGHT");
     for (const light of lights) {
+      console.log("Detected local light:", light);
       if (seen.has(light.id)) continue;
       seen.add(light.id);
 
@@ -275,7 +338,7 @@ export default function App() {
               { id: eventId, name: p.name, playerId: p.id, timerName: torch.name },
               { destination: "REMOTE" }
             );
-
+            
             (async () => {
               if (isRoomTimer(torch)) {
                 const lightId = torch.lightId; // OK
@@ -305,6 +368,7 @@ export default function App() {
   const start = async () => {
     const startedAt = now();
     await writeRoomTimers((prev) => prev.map((t) => {
+      console.log("Starting timer:", t);
       if(isRunning(t)) return t; 
       if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: startedAt };
       return { ...t, startAt: startedAt, pausedAt: undefined };
@@ -464,68 +528,10 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. 
-        v1.0.17
+        v1.0.18
       </p>
     </div>
   );
 }
 
-function Controls(props: {
-  minutes: number;
-  seconds: number;
-  name: string;
-  onMinutesChange: (m: number) => void;
-  onSecondsChange: (s: number) => void;
-  onNameChange: (n: string) => void;
-  onStart: () => Promise<void>;
-  onPause: () => Promise<void>;
-  onSetDuration: () => Promise<void>;
-}) {
-  const { minutes, seconds, name, onMinutesChange, onSecondsChange, onNameChange } = props;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {/* Row 1: buttons */}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={props.onStart}>Start</button>
-        <button onClick={props.onPause}>Pause</button>
-        <button title="Add & Start new timer with duration" onClick={props.onSetDuration}>Set</button>
-      </div>
 
-      {/* Row 2: name + duration controls */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span>Name:</span>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => onNameChange(e.target.value)}
-          placeholder="e.g., Torch, Lantern, Light spell"
-          style={{ width: 200 }}
-          aria-label="Timer name"
-        />
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span>Duration:</span>
-        <input
-          type="number"
-          min={0}
-          value={minutes}
-          onChange={(e) => onMinutesChange(Math.max(0, parseInt(e.target.value || "0", 10)))}
-          style={{ width: 64 }}
-          aria-label="Minutes"
-        />
-        <span>min</span>
-
-        <input
-          type="number"
-          min={0}
-          max={59}
-          value={seconds}
-          onChange={(e) => onSecondsChange(Math.max(0, Math.min(59, parseInt(e.target.value || "0", 10))))}
-          style={{ width: 64 }}
-          aria-label="Seconds"
-        />
-        <span>sec</span>
-      </div>
-    </div>
-  );
-}
