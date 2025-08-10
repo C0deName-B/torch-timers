@@ -257,7 +257,6 @@ export default function App() {
   const offLocal = OBR.scene.local.onChange(async (items) => {
     const lights = items.filter((it: Item) => it.type === "LIGHT");
     for (const light of lights) {
-      console.log("Detected local light:", light);
       if (seen.has(light.id)) continue;
       seen.add(light.id);
 
@@ -364,11 +363,65 @@ export default function App() {
     }
   }, [rows, tick]);
 
+  useEffect(() => {
+  if (!OBR.isAvailable) return;
+
+  const lastMeta = new Map<string, Record<string, unknown>>();
+
+  function diffMeta(prev?: Record<string, unknown>, next?: Record<string, unknown>) {
+    const p = prev ?? {}, n = next ?? {};
+    const keys = new Set([...Object.keys(p), ...Object.keys(n)]);
+    const added: string[] = [], removed: string[] = [], changed: string[] = [];
+    for (const k of keys) {
+      if (!(k in p)) added.push(k);
+      else if (!(k in n)) removed.push(k);
+      else if (JSON.stringify(p[k]) !== JSON.stringify(n[k])) changed.push(k);
+    }
+    return { added, removed, changed };
+  }
+
+  // 1) Watch *player* selection changes
+  const offPlayer = OBR.player.onChange(async (player) => {
+    const sel = player.selection ?? [];
+    if (sel.length !== 1) return;
+    const [it] = await OBR.scene.items.getItems(sel);
+    if (!it) return;
+    console.groupCollapsed(`[Inspector] Selected ${it.type} ${it.id} metadata snapshot`);
+    console.log(it.metadata);
+    console.groupEnd();
+  });
+
+  // 2) Watch shared *items* for metadata diffs
+  const offItems = OBR.scene.items.onChange((items: Item[]) => {
+    for (const it of items) {
+      const prev = lastMeta.get(it.id);
+      const next = (it.metadata ?? {}) as Record<string, unknown>;
+      const { added, removed, changed } = diffMeta(prev, next);
+      if (added.length || removed.length || changed.length) {
+        console.groupCollapsed(`[Inspector] Item changed ${it.type} ${it.id}`);
+        if (added.length)   console.log("added keys:", added);
+        if (removed.length) console.log("removed keys:", removed);
+        if (changed.length) console.log("changed keys:", changed);
+        const interesting = [...new Set([...added, ...removed, ...changed])];
+        const snapshot: Record<string, unknown> = {};
+        for (const k of interesting) snapshot[k] = next[k];
+        console.log("current values:", snapshot);
+        console.groupEnd();
+      }
+      lastMeta.set(it.id, next);
+    }
+  });
+
+  return () => {
+    offPlayer();
+    offItems();
+  };
+}, []);
+
   // === Controls (room-shared over flat array) ===
   const start = async () => {
     const startedAt = now();
     await writeRoomTimers((prev) => prev.map((t) => {
-      console.log("Starting timer:", t);
       if(isRunning(t)) return t; 
       if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: startedAt };
       return { ...t, startAt: startedAt, pausedAt: undefined };
