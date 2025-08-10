@@ -192,10 +192,11 @@ export default function App() {
   const processedLightsRef = useRef<Map<string, number>>(new Map());
   
   function recentlyProcessed(imageId: string, ttlMs = 1500) {
-    const t = processedLightsRef.current.get(imageId) ?? 0;
-    const n = Date.now();
-    if (n - t < ttlMs) return true;
-    processedLightsRef.current.set(imageId, n);
+    const map = processedLightsRef.current;
+    const prev = map.get(imageId);
+    const now = Date.now();
+    if (prev !== undefined && (now - prev) < ttlMs) return true; // only swallow if we’ve seen it before
+    map.set(imageId, now);
     return false;
   }
 
@@ -621,7 +622,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.23 (dynamic-fog metadata mode)
+        v1.0.24 (dynamic-fog metadata mode)
       </p>
     </div>
   );
