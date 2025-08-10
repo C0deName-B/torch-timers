@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import OBR from "@owlbear-rodeo/sdk";
 import type { Item } from "@owlbear-rodeo/sdk";
 
-
 const NAMESPACE = "com.brian.shadowdark-torches";
 const META_KEY = `${NAMESPACE}/torch` as const;
 const ALERT_CHANNEL = `${NAMESPACE}/alerts`;
+
+// Dynamic Fog (official) light flag placed on IMAGE items
+const DYN_LIGHT_KEY = "rodeo.owlbear.dynamic-fog/light";
 
 // === Types ===
 export type TorchState = {
@@ -19,10 +21,10 @@ export type TorchState = {
 
 // Room-wide shared timer (not keyed by player id)
 type RoomTimer = TorchState & {
-  id: string; // required at storage time
-  ownerId?: string; // may be ephemeral; used when available
-  ownerName: string; // display label; persists if owner disconnects/changes id
-  lightId: string; // unique id for this light source, used for event tracking
+  id: string;           // required at storage time
+  ownerId?: string;
+  ownerName: string;    // label
+  lightId: string;      // ← now the IMAGE id hosting dynamic-fog light metadata
 };
 
 export type PlayerRow = { id: string; name: string; torches: TorchState[]; isSelf: boolean };
@@ -54,7 +56,6 @@ function format(ms: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-
 function isRoomTimer(value: unknown): value is RoomTimer {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -77,9 +78,7 @@ function isRoomTimerArray(value: unknown): value is RoomTimer[] { return Array.i
 async function readRoomTimers(): Promise<RoomTimer[]> {
   const metadata = await OBR.room.getMetadata();
   const raw = (metadata as Record<string, unknown>)[META_KEY];
-
   if (isRoomTimerArray(raw)) return raw.map((t) => ({ ...t, id: t.id || newId() }));
-
   return [];
 }
 
@@ -122,14 +121,12 @@ function Controls(props: {
   const { minutes, seconds, name, onMinutesChange, onSecondsChange, onNameChange } = props;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {/* Row 1: buttons */}
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={props.onStart}>Start</button>
         <button onClick={props.onPause}>Pause</button>
         <button title="Add & Start new timer with duration" onClick={props.onSetDuration}>Set</button>
       </div>
 
-      {/* Row 2: name + duration controls */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <span>Name:</span>
         <input
@@ -178,12 +175,9 @@ export default function App() {
   const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set());
   const lastBadgeRef = useRef<string | undefined>(undefined);
-  
-  const inputsRef = useRef({ m: minutesInput, s: secondsInput, name: nameInput });
-  useEffect(() => {
-  inputsRef.current = { m: minutesInput, s: secondsInput, name: nameInput };
-}, [minutesInput, secondsInput, nameInput]);
 
+  const inputsRef = useRef({ m: minutesInput, s: secondsInput, name: nameInput });
+  useEffect(() => { inputsRef.current = { m: minutesInput, s: secondsInput, name: nameInput }; }, [minutesInput, secondsInput, nameInput]);
 
   async function refresh() {
     const selfId = OBR.player.id;
@@ -195,7 +189,7 @@ export default function App() {
     const nameById = new Map<string, string>();
     party.forEach((p) => nameById.set(p.id, p.name));
 
-    // Group timers by owner. Use current party name if available; else use stored ownerName.
+    // Group timers by owner. Use current party name if available; else stored ownerName.
     const rowsMap = new Map<string, PlayerRow>();
     for (const t of timers) {
       const ownerKey = t.ownerId ?? `name:${t.ownerName}`;
@@ -210,7 +204,6 @@ export default function App() {
       row.torches.push(t);
     }
 
-    // Ensure current player row exists even if they have no timers yet (optional)
     if (!rowsMap.size) {
       rowsMap.set(selfId, { id: selfId, name: selfName, torches: [], isSelf: true });
     }
@@ -218,7 +211,7 @@ export default function App() {
     setRows(Array.from(rowsMap.values()));
   }
 
-  // === Effects ===
+  // === Base effects ===
   useEffect(() => {
     if (!OBR.isAvailable) return;
     refresh();
@@ -240,52 +233,84 @@ export default function App() {
     return () => { offParty(); offRoom(); offOpen(); offBroadcast(); clearInterval(t); };
   }, []);
 
+  // === NEW: Dynamic-fog watcher (add/remove key on IMAGE) ===
   useEffect(() => {
-  if (!OBR.isAvailable) return;
+    if (!OBR.isAvailable) return;
 
-  const seen = new Set<string>();
+    // Track last metadata per item id to detect added/removed keys
+    const lastMeta = new Map<string, Record<string, unknown>>();
 
-  // Seed with current local items so we only react to *new* lights
-  (async () => {
-    try {
-      const local = await OBR.scene.local.getItems();
-      local.forEach((it: Item) => seen.add(it.id));
-    } catch {/*itnore errors*/}
-  })();
+    function diffMeta(prev?: Record<string, unknown>, next?: Record<string, unknown>) {
+      const p = prev ?? {}, n = next ?? {};
+      const keys = new Set([...Object.keys(p), ...Object.keys(n)]);
+      const added: string[] = [], removed: string[] = [], changed: string[] = [];
+      for (const k of keys) {
+        if (!(k in p)) added.push(k);
+        else if (!(k in n)) removed.push(k);
+        else if (JSON.stringify(p[k]) !== JSON.stringify(n[k])) changed.push(k);
+      }
+      return { added, removed, changed };
+    }
 
-  // React to new local LIGHT items
-  const offLocal = OBR.scene.local.onChange(async (items) => {
-    const lights = items.filter((it: Item) => it.type === "LIGHT");
-    for (const light of lights) {
-      if (seen.has(light.id)) continue;
-      seen.add(light.id);
-
-      // snapshot current inputs
+    async function ensureTimerForImage(imageId: string) {
       const { m, s, name } = inputsRef.current;
       const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
-      const ownerId = OBR.player.id;
-      const ownerName = await OBR.player.getName();
+      const ownerName = "Player"; // We don't know the placer here; keep generic.
 
-      await writeRoomTimers((prev) => [
-        ...prev,
-        {
-          id: newId(),
-          name: (name ?? "").trim() || "Light",
-          durationMs: totalSeconds * 1000,
-          offsetMs: 0,
-          pausedAt: undefined,
-          startAt: Date.now(),
-          ownerId,
-          ownerName,
-          lightId: light.id, // ← link timer to the light
-        },
-      ]);
+      await writeRoomTimers((prev) => {
+        // Idempotent: if we already have a timer for this imageId, do nothing.
+        if (prev.some((t) => t.lightId === imageId)) return prev;
+        return [
+          ...prev,
+          {
+            id: newId(),
+            name: (name ?? "").trim() || "Light",
+            durationMs: totalSeconds * 1000,
+            offsetMs: 0,
+            pausedAt: undefined,
+            startAt: Date.now(),
+            ownerName,
+            lightId: imageId,
+          },
+        ];
+      });
     }
-  });
 
-  return () => offLocal();
-}, []);
+    async function removeTimersForImage(imageId: string) {
+      await writeRoomTimers((prev) => prev.filter((t) => t.lightId !== imageId));
+    }
 
+    const offItems = OBR.scene.items.onChange(async (items: Item[]) => {
+      for (const it of items) {
+        // Only care about IMAGEs since dynamic fog attaches to images
+        if (it.type !== "IMAGE") {
+          // still update lastMeta so we don't keep re-logging
+          lastMeta.set(it.id, (it.metadata ?? {}) as Record<string, unknown>);
+          continue;
+        }
+
+        const prev = lastMeta.get(it.id);
+        const next = (it.metadata ?? {}) as Record<string, unknown>;
+        const { added, removed /*, changed*/ } = diffMeta(prev, next);
+
+        if (added.includes(DYN_LIGHT_KEY)) {
+          // A dynamic light was added to this image
+          await ensureTimerForImage(it.id);
+        }
+
+        if (removed.includes(DYN_LIGHT_KEY)) {
+          // Light removed (e.g., GM clicked "remove light") → clear matching timer(s)
+          await removeTimersForImage(it.id);
+        }
+
+        lastMeta.set(it.id, next);
+      }
+    });
+
+    return () => { offItems(); };
+  }, []);
+
+  // === Badge updater ===
   useEffect(() => {
     if (!OBR.isAvailable) return;
     async function updateBadge() {
@@ -311,11 +336,25 @@ export default function App() {
     updateBadge();
   }, [rows, isOpen, tick]);
 
-  // Cross-zero detector → notifications & broadcast
+  // === When timers cross zero → notify, broadcast, remove DYN flag, remove timer
   useEffect(() => {
     if (!OBR.isAvailable) return;
 
     const prev = prevRemainingRef.current;
+
+    async function removeDynamicLightFlag(imageId: string) {
+      try {
+        await OBR.scene.items.updateItems([imageId], (items) =>
+          items.map((it) => {
+            const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
+            delete meta[DYN_LIGHT_KEY];
+            return { ...it, metadata: meta };
+          })
+        );
+      } catch {
+        /* noop */
+      }
+    }
 
     for (const p of rows) {
       p.torches.forEach((torch, idx) => {
@@ -337,24 +376,15 @@ export default function App() {
               { id: eventId, name: p.name, playerId: p.id, timerName: torch.name },
               { destination: "REMOTE" }
             );
-            
+
             (async () => {
-              if (isRoomTimer(torch)) {
-                const lightId = torch.lightId; // OK
-                // delete local light if owner
-                if (lightId && p.id === OBR.player.id) {
-                  try {
-                    await OBR.scene.local.deleteItems([lightId]);
-                  } catch {
-                    /* noop */
-                  }
-                }
-
-                // remove the expired timer
-                await writeRoomTimers(prev => prev.filter(t => t.id !== torch.id));
+              // If this timer is linked to a dynamic-fog light, remove its key from the image
+              if (isRoomTimer(torch) && torch.lightId) {
+                await removeDynamicLightFlag(torch.lightId);
               }
+              // Then remove the expired timer itself
+              await writeRoomTimers((prevTimers) => prevTimers.filter((t) => t.id !== torch.id));
             })();
-
           }
         }
 
@@ -363,69 +393,16 @@ export default function App() {
     }
   }, [rows, tick]);
 
-  useEffect(() => {
-  if (!OBR.isAvailable) return;
-
-  const lastMeta = new Map<string, Record<string, unknown>>();
-
-  function diffMeta(prev?: Record<string, unknown>, next?: Record<string, unknown>) {
-    const p = prev ?? {}, n = next ?? {};
-    const keys = new Set([...Object.keys(p), ...Object.keys(n)]);
-    const added: string[] = [], removed: string[] = [], changed: string[] = [];
-    for (const k of keys) {
-      if (!(k in p)) added.push(k);
-      else if (!(k in n)) removed.push(k);
-      else if (JSON.stringify(p[k]) !== JSON.stringify(n[k])) changed.push(k);
-    }
-    return { added, removed, changed };
-  }
-
-  // 1) Watch *player* selection changes
-  const offPlayer = OBR.player.onChange(async (player) => {
-    const sel = player.selection ?? [];
-    if (sel.length !== 1) return;
-    const [it] = await OBR.scene.items.getItems(sel);
-    if (!it) return;
-    console.groupCollapsed(`[Inspector] Selected ${it.type} ${it.id} metadata snapshot`);
-    console.log(it.metadata);
-    console.groupEnd();
-  });
-
-  // 2) Watch shared *items* for metadata diffs
-  const offItems = OBR.scene.items.onChange((items: Item[]) => {
-    for (const it of items) {
-      const prev = lastMeta.get(it.id);
-      const next = (it.metadata ?? {}) as Record<string, unknown>;
-      const { added, removed, changed } = diffMeta(prev, next);
-      if (added.length || removed.length || changed.length) {
-        console.groupCollapsed(`[Inspector] Item changed ${it.type} ${it.id}`);
-        if (added.length)   console.log("added keys:", added);
-        if (removed.length) console.log("removed keys:", removed);
-        if (changed.length) console.log("changed keys:", changed);
-        const interesting = [...new Set([...added, ...removed, ...changed])];
-        const snapshot: Record<string, unknown> = {};
-        for (const k of interesting) snapshot[k] = next[k];
-        console.log("current values:", snapshot);
-        console.groupEnd();
-      }
-      lastMeta.set(it.id, next);
-    }
-  });
-
-  return () => {
-    offPlayer();
-    offItems();
-  };
-}, []);
-
-  // === Controls (room-shared over flat array) ===
+  // === Manual controls (room-shared over flat array) ===
   const start = async () => {
     const startedAt = now();
-    await writeRoomTimers((prev) => prev.map((t) => {
-      if(isRunning(t)) return t; 
-      if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: startedAt };
-      return { ...t, startAt: startedAt, pausedAt: undefined };
-    }));
+    await writeRoomTimers((prev) =>
+      prev.map((t) => {
+        if (isRunning(t)) return t;
+        if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: startedAt };
+        return { ...t, startAt: startedAt, pausedAt: undefined };
+      })
+    );
   };
 
   const pause = async () => {
@@ -451,7 +428,7 @@ export default function App() {
         startAt: now(),
         ownerId,
         ownerName,
-        lightId: ""
+        lightId: "" // manual timers not linked to an image
       },
     ]);
 
@@ -462,13 +439,13 @@ export default function App() {
     await writeRoomTimers((prev) => prev.filter((t) => t.id !== torchId));
   };
 
-  // === UI (unchanged) ===
+  // === UI ===
   return (
     <div
       className="p-3 text-sm"
       style={{
         fontFamily: "system-ui, sans-serif",
-        color: "white", // keep text white
+        color: "white",
       }}
     >
       <h2 style={{ fontSize: 18, margin: 0, marginBottom: 8 }}>Shadowdark Torch Timers</h2>
@@ -533,7 +510,6 @@ export default function App() {
                     {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
                   </div>
 
-                  {/* Delete (self only) */}
                   <div>
                     {p.isSelf && (
                       <button
@@ -546,7 +522,6 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Life gauge */}
                   <div style={{ gridColumn: "1 / -1" }}>
                     <div
                       style={{
@@ -580,11 +555,9 @@ export default function App() {
       </div>
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone is alerted when a light source diminishes. 
-        v1.0.20
+        Everyone is alerted when a light source diminishes. <br />
+        v1.1.21 (dynamic-fog metadata mode)
       </p>
     </div>
   );
 }
-
-
