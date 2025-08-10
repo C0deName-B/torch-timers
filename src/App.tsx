@@ -122,31 +122,55 @@ const setMinutes = async (mins: number) => {
   return (
     <div className="p-3 text-sm" style={{ fontFamily: "system-ui, sans-serif" }}>
       <h2 style={{ fontSize: 18, margin: 0, marginBottom: 8 }}>Shadowdark Torch Timers</h2>
-      <Controls onStart={start} onPause={pause} onReset={() => writeSelf(DEFAULT)} onSetMinutes={setMinutes} />
+      <Controls onStart={start} onPause={pause} onSetMinutes={setMinutes} />
       <div style={{ marginTop: 10, borderTop: "1px solid #ddd", paddingTop: 8 }}>
         {rows.map((p) => {
-          const rem = getRemaining(p.torch);
-          const running = isRunning(p.torch);
-          const expired = rem <= 0;
-          return (
-            <div key={p.id}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr auto",
-                gap: 8,
-                padding: "6px 8px",
-                borderRadius: 8,
-                background: p.isSelf ? "rgba(0,0,0,0.03)" : "transparent",
-                marginBottom: 6
-              }}>
-              <div style={{ fontWeight: 600 }}>{p.name}</div>
-              <div title={running ? "burning" : expired ? "expired" : "paused"}
-                   style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
-                {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
-              </div>
-            </div>
-          );
-        })}
+  const rem = getRemaining(p.torch);
+  const total = p.torch.durationMs ?? DEFAULT.durationMs;
+  const pct = Math.max(0, Math.min(100, (rem / total) * 100));
+  const running = isRunning(p.torch);
+  const expired = rem <= 0;
+
+  return (
+    <div key={p.id}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "1fr auto",
+        gap: 8,
+        padding: "6px 8px",
+        borderRadius: 8,
+        background: p.isSelf ? "rgba(0,0,0,0.03)" : "transparent",
+        marginBottom: 6
+      }}>
+      <div style={{ fontWeight: 600 }}>{p.name}</div>
+      <div title={running ? "burning" : expired ? "expired" : "paused"}
+           style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
+        {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
+      </div>
+
+      {/* Life-gauge bar spans both columns */}
+      <div style={{ gridColumn: "1 / -1" }}>
+        <div style={{
+          height: 10,
+          width: "100%",
+          background: "linear-gradient(90deg, #ffe9a3, #ffc163, #ff6a4a)",
+          borderRadius: 6,
+          position: "relative",
+          overflow: "hidden",
+          opacity: expired ? 0.4 : 1
+        }}>
+          <div style={{
+            position: "absolute",
+            top: 0, left: 0, bottom: 0,
+            width: `${pct}%`,
+            background: "rgba(0,0,0,0.15)", // masks to reveal depletion
+            transition: "width 300ms linear"
+          }} />
+        </div>
+      </div>
+    </div>
+  );
+})}
       </div>
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone sees updates instantly thanks to player metadata.
@@ -158,7 +182,6 @@ const setMinutes = async (mins: number) => {
 function Controls(props: {
   onStart: () => Promise<void>;
   onPause: () => Promise<void>;
-  onReset: () => Promise<void>;
   onSetMinutes: (m: number) => Promise<void>;
 }) {
   const [mins, setMins] = useState(60);
@@ -166,7 +189,6 @@ function Controls(props: {
     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <button onClick={props.onStart}>Start</button>
       <button onClick={props.onPause}>Pause</button>
-      <button onClick={props.onReset}>Reset</button>
       <span style={{ marginLeft: 6 }}>Duration (min):</span>
       <input
         type="number"
