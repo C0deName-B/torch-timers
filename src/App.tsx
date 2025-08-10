@@ -209,11 +209,14 @@ export default function App() {
   // Returns the lock id if we won, or undefined if another client beat us to it.
   async function tryClaimLightLock(imageId: string): Promise<string | undefined> {
     const claimId = uuid();
+    console.log("[lock] attempt", { imageId, claimId });
 
     await OBR.scene.items.updateItems([imageId], (items) =>
       items.map((it) => {
         const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
-        if (!meta[LINK_KEY]) meta[LINK_KEY] = { id: claimId, at: Date.now() } as LightLink;
+        if (!meta[LINK_KEY]) {
+          meta[LINK_KEY] = { id: claimId, at: Date.now() } as LightLink;
+        }
         return { ...it, metadata: meta };
       })
     );
@@ -222,8 +225,11 @@ export default function App() {
     const meta: Record<string, unknown> = (after?.metadata ?? {});
     const link = meta[LINK_KEY];
     const current = isLightLink(link) ? link.id : undefined;
+
+    console.log("[lock] read-back", { imageId, current, mine: claimId });
     return current === claimId ? claimId : undefined;
   }
+
 
   async function clearLightLock(imageId: string) {
     await OBR.scene.items.updateItems([imageId], (items) =>
@@ -317,8 +323,13 @@ export default function App() {
 
       // 2) Cross-client dedupe: only the winner proceeds
       const claimed = await tryClaimLightLock(imageId);
-      if (!claimed) return;
-
+      if (!claimed) {
+        console.debug("[lock] lost claim, skipping timer", imageId);
+        return;
+      }
+      console.debug("[lock] won claim, creating timer", imageId);
+      const before = await readRoomTimers();
+      
       // 3) Add timer (keep idempotence as a safety net)
       const { m, s, name } = inputsRef.current;
       const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
@@ -342,6 +353,10 @@ export default function App() {
           },
         ];
       });
+
+      const after = await readRoomTimers();
+      const created = after.length > before.length;
+      console.log("[timer] create result", { imageId, created, total: after.length });
     }
 
 
@@ -627,7 +642,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.25 (dynamic-fog metadata mode)
+        v1.0.26 (dynamic-fog metadata mode)
       </p>
     </div>
   );
