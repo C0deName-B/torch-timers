@@ -393,7 +393,7 @@ export default function App() {
       </div>
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone is alerted when a light source diminishes. (Self can delete their own timers.)
+        Everyone is alerted when a light source diminishes.
       </p>
     </div>
   );
