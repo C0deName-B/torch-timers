@@ -92,7 +92,7 @@ export default function App() {
   const [minutesInput, setMinutesInput] = useState<number>(60);
   const [secondsInput, setSecondsInput] = useState<number>(0);
   const [isOpen, setIsOpen] = useState<boolean>(true);
-  //const prevRemainingRef = useRef<Record<string, number>>({});
+  const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set()); // dedupe cross-room
   const lastBadgeRef = useRef<string | undefined>(undefined);
 
@@ -161,6 +161,43 @@ useEffect(() => {
 
   updateBadge();
 }, [rows, isOpen, tick]);
+
+useEffect(() => {
+  if (!OBR.isAvailable) return;
+
+  const prev = prevRemainingRef.current;
+
+  for (const p of rows) {
+    const rem = getRemaining(p.torch);
+    const prevRem = prev[p.id] ?? rem;
+
+    // Edge trigger: was > 0, now <= 0 (and the torch was actually running)
+    const crossedToZero = prevRem > 0 && rem <= 0;
+    const wasActive = !!p.torch.startAt && !p.torch.pausedAt;
+
+    if (crossedToZero && wasActive) {
+      const eventId = `${p.id}:${p.torch.durationMs}:${p.torch.startAt ?? 0}:${p.torch.offsetMs ?? 0}`;
+
+      if (!handledEventIdsRef.current.has(eventId)) {
+        handledEventIdsRef.current.add(eventId);
+
+        // Toast locally
+        OBR.notification.show(`💡 ${p.name}'s torch went out!`, "WARNING");
+
+        // Tell everyone else
+        OBR.broadcast.sendMessage(
+          ALERT_CHANNEL,
+          { id: eventId, name: p.name, playerId: p.id },
+          { destination: "REMOTE" }
+        );
+      }
+    }
+
+    // Update previous value for next tick
+    prev[p.id] = rem;
+  }
+}, [rows, tick]);
+
 
   const start = async () => {
     const self = await readSelf();
