@@ -309,7 +309,11 @@ export default function App() {
 
     async function ensureTimerForImage(imageId: string) {
       // 1) Swallow the immediate echo locally
-      if (recentlyProcessed(imageId)) return;
+      console.debug("[lights] ensureTimerForImage start", imageId);
+      if (recentlyProcessed(imageId)) {
+        console.debug("[lights] swallowed as recent", imageId);
+        return;
+      }
 
       // 2) Cross-client dedupe: only the winner proceeds
       const claimed = await tryClaimLightLock(imageId);
@@ -362,6 +366,7 @@ export default function App() {
         // React specifically to dynamic-fog light metadata being toggled on IMAGEs
         if (it.type === "IMAGE") {
           if (added.includes(DYN_LIGHT_KEY)) {
+            console.debug("[lights] added on", it.id);
             await ensureTimerForImage(it.id);
           }
           if (removed.includes(DYN_LIGHT_KEY)) {
@@ -622,7 +627,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.24 (dynamic-fog metadata mode)
+        v1.0.25 (dynamic-fog metadata mode)
       </p>
     </div>
   );
