@@ -186,7 +186,7 @@ export default function App() {
     for (const p of rows) {
       p.torches.forEach((torch, idx) => {
         const rem = getRemaining(torch);
-        const key = `${p.id}:${torch.id ?? idx}`; // prefer stable id
+        const key = `${p.id}:${torch.id ?? idx}`;
         const prevRem = prev[key] ?? rem;
 
         const crossedToZero = prevRem > 0 && rem <= 0;
@@ -236,14 +236,14 @@ export default function App() {
     await writeSelfArray((prev) => [
       ...prev,
       withId({
-        name: (name ?? "").trim() || undefined,     // NEW: store provided name if non-empty
+        name: (name ?? "").trim() || undefined,
         durationMs: totalSeconds * 1000,
         offsetMs: 0,
         pausedAt: undefined,
-        startAt: Date.now(), // start immediately
+        startAt: Date.now(), 
       }),
     ]);
-    // optional: clear name input after creating
+
     setNameInput("");
   };
 
@@ -252,116 +252,149 @@ export default function App() {
   };
 
   return (
-    <div className="p-3 text-sm" style={{ fontFamily: "system-ui, sans-serif" }}>
-      <h2 style={{ fontSize: 18, margin: 0, marginBottom: 8 }}>Shadowdark Torch Timers</h2>
-      <Controls
-        minutes={minutesInput}
-        seconds={secondsInput}
-        name={nameInput}                               // NEW
-        onMinutesChange={setMinutesInput}
-        onSecondsChange={setSecondsInput}
-        onNameChange={setNameInput}                    // NEW
-        onStart={start}
-        onPause={pause}
-        onSetDuration={() => setDuration(minutesInput, secondsInput, nameInput)}
-      />
+  <div
+    className="p-3 text-sm"
+    style={{
+      fontFamily: "system-ui, sans-serif",
+      color: "white" // ← all text will be white
+    }}
+  >
+    <h2 style={{ fontSize: 18, margin: 0, marginBottom: 8 }}>
+      Shadowdark Torch Timers
+    </h2>
+    <Controls
+      minutes={minutesInput}
+      seconds={secondsInput}
+      name={nameInput}
+      onMinutesChange={setMinutesInput}
+      onSecondsChange={setSecondsInput}
+      onNameChange={setNameInput}
+      onStart={start}
+      onPause={pause}
+      onSetDuration={() => setDuration(minutesInput, secondsInput, nameInput)}
+    />
 
-      <div style={{ marginTop: 10, borderTop: "1px solid #ddd", paddingTop: 8 }}>
-        {rows.map((p) => (
-          <div key={p.id} style={{ marginBottom: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>{p.name}</div>
+    <div
+      style={{
+        marginTop: 10,
+        borderTop: "1px solid #ddd",
+        paddingTop: 8
+      }}
+    >
+      {rows.map((p) => (
+        <div key={p.id} style={{ marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>{p.name}</div>
 
-            {p.torches.map((t, idx) => {
-              const rem = getRemaining(t);
-              const total = t.durationMs ?? DEFAULT.durationMs;
-              const pct = Math.max(0, Math.min(100, (rem / total) * 100));
-              const running = isRunning(t);
-              const expired = rem <= 0;
+          {p.torches.map((t, idx) => {
+            const rem = getRemaining(t);
+            const total = t.durationMs ?? DEFAULT.durationMs;
+            const pct = Math.max(0, Math.min(100, (rem / total) * 100));
+            const running = isRunning(t);
+            const expired = rem <= 0;
 
-              return (
+            return (
+              <div
+                key={`${p.id}:${t.id ?? idx}`}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr auto",
+                  gap: 8,
+                  padding: "6px 8px",
+                  borderRadius: 8,
+                  background: p.isSelf
+                    ? "rgba(0,0,0,0.03)"
+                    : "transparent",
+                  marginBottom: 6,
+                  alignItems: "center"
+                }}
+              >
                 <div
-                  key={`${p.id}:${t.id ?? idx}`}
                   style={{
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr auto",
-                    gap: 8,
-                    padding: "6px 8px",
-                    borderRadius: 8,
-                    background: p.isSelf ? "rgba(0,0,0,0.03)" : "transparent",
-                    marginBottom: 6,
-                    alignItems: "center",
+                    opacity: 0.8,
+                    fontWeight: 600,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 140
                   }}
                 >
-                  <div style={{ opacity: 0.8, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 140 }}>
-                    {t.name ? t.name : `#${idx + 1}`}
-                  </div>
+                  {t.name ? t.name : `#${idx + 1}`}
+                </div>
+                <div
+                  title={running ? "burning" : expired ? "expired" : "paused"}
+                  style={{
+                    fontVariantNumeric: "tabular-nums",
+                    fontWeight: 700,
+                    textAlign: "right"
+                  }}
+                >
+                  {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
+                </div>
+
+                {/* Delete (self only) */}
+                <div>
+                  {p.isSelf && (
+                    <button
+                      title="Delete timer"
+                      onClick={() =>
+                        deleteTorch(t.id ?? String(idx))
+                      }
+                      style={{ cursor: "pointer" }}
+                    >
+                      🗑️
+                    </button>
+                  )}
+                </div>
+
+                {/* Life gauge */}
+                <div style={{ gridColumn: "1 / -1" }}>
                   <div
-                    title={running ? "burning" : expired ? "expired" : "paused"}
-                    style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, textAlign: "right" }}
+                    style={{
+                      position: "relative",
+                      height: 12,
+                      width: "100%",
+                      background:
+                        "linear-gradient(90deg, #ffe9a3, #ffc163, #ff6a4a)",
+                      borderRadius: 8,
+                      overflow: "hidden",
+                      boxShadow: "inset 0 1px 2px rgba(0,0,0,0.25)"
+                    }}
                   >
-                    {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
-                  </div>
-
-                  {/* Delete (self only) */}
-                  <div>
-                    {p.isSelf && (
-                      <button
-                        title="Delete timer"
-                        onClick={() => deleteTorch(t.id ?? String(idx))}
-                        style={{ cursor: "pointer" }}
-                      >
-                        🗑️
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Life gauge */}
-                  <div style={{ gridColumn: "1 / -1" }}>
                     <div
                       style={{
-                        position: "relative",
-                        height: 12,
-                        width: "100%",
-                        background: "linear-gradient(90deg, #ffe9a3, #ffc163, #ff6a4a)",
-                        borderRadius: 8,
-                        overflow: "hidden",
-                        boxShadow: "inset 0 1px 2px rgba(0,0,0,0.25)",
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        bottom: 0,
+                        width: `${100 - pct}%`,
+                        background: "#000",
+                        transition: "width 300ms linear"
                       }}
-                    >
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          bottom: 0,
-                          width: `${100 - pct}%`,
-                          background: "#000",
-                          transition: "width 300ms linear",
-                        }}
-                      />
-                    </div>
+                    />
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-
-      <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone is alerted when a light source diminishes. (Self can delete their own timers.)
-      </p>
+              </div>
+            );
+          })}
+        </div>
+      ))}
     </div>
-  );
+
+    <p style={{ opacity: 0.7, marginTop: 8 }}>
+      Everyone is alerted when a light source diminishes. (Self can delete
+      their own timers.)
+    </p>
+  </div>
+);
 }
 
 function Controls(props: {
   minutes: number;
   seconds: number;
-  name: string;                                  // NEW
+  name: string;
   onMinutesChange: (m: number) => void;
   onSecondsChange: (s: number) => void;
-  onNameChange: (n: string) => void;             // NEW
+  onNameChange: (n: string) => void;
   onStart: () => Promise<void>;
   onPause: () => Promise<void>;
   onSetDuration: () => Promise<void>;
