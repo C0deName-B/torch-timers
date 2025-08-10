@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import OBR from "@owlbear-rodeo/sdk";
 
 const NAMESPACE = "com.brian.shadowdark-torches";
 const META_KEY = `${NAMESPACE}/torch` as const;
-
+const ALERT_CHANNEL = `${NAMESPACE}/alerts`;
 
 type TorchState = {
   durationMs: number;
@@ -93,6 +93,8 @@ export default function App() {
   const [minutesInput, setMinutesInput] = useState<number>(60);
   const [secondsInput, setSecondsInput] = useState<number>(0);
   const [isOpen, setIsOpen] = useState<boolean>(true);
+  const prevRemainingRef = useRef<Record<string, number>>({});
+  const handledEventIdsRef = useRef<Set<string>>(new Set()); // dedupe cross-room
 
   async function refresh() {
     const self = await readSelf();
@@ -116,11 +118,19 @@ export default function App() {
 
     const offParty  = OBR.party.onChange(refresh);
     const offPlayer = OBR.player.onChange(refresh);
-    const offOpen   = OBR.action.onOpenChange(setIsOpen); // <— NEW
+    const offOpen   = OBR.action.onOpenChange(setIsOpen);
 
+    // 🔔 Receive alerts from others and toast locally
+    const offBroadcast = OBR.broadcast.onMessage(ALERT_CHANNEL, async (evt) => {
+      const data = evt.data as { id: string; name: string; playerId: string } | undefined;
+      if (!data || handledEventIdsRef.current.has(data.id)) return;
+      handledEventIdsRef.current.add(data.id);
+
+      await OBR.notification.show(`💡 ${data.name}'s torch went out!`, "WARNING");
+    });
+    
     const t = setInterval(() => forceTick((x) => x + 1), 500);
-
-    return () => { offParty(); offPlayer(); offOpen(); clearInterval(t); };
+    return () => { offParty(); offPlayer(); offOpen(); offBroadcast();  clearInterval(t); };
   }, []);
 
   useEffect(() => {
@@ -143,6 +153,37 @@ export default function App() {
     updateBadge();
   }, [rows, isOpen]); // re-run when timers change or the popover opens/closes
 
+    useEffect(() => {
+    if (!OBR.isAvailable) return;
+
+    const prev = prevRemainingRef.current;
+
+    for (const p of rows) {
+      const rem = getRemaining(p.torch);
+      const prevRem = prev[p.id] ?? rem;
+
+      // Edge trigger: was > 0, now <= 0 → fire once
+      if (prevRem > 0 && rem <= 0) {
+        const eventId = `${p.id}:${p.torch.durationMs}:${p.torch.startAt ?? 0}:${p.torch.offsetMs ?? 0}`;
+        if (!handledEventIdsRef.current.has(eventId)) {
+          handledEventIdsRef.current.add(eventId);
+
+          // Toast locally immediately
+          OBR.notification.show(`💡 ${p.name}'s torch went out!`, "WARNING");
+
+          // Tell everyone else (REMOTE → others only)
+          OBR.broadcast.sendMessage(
+            ALERT_CHANNEL,
+            { id: eventId, name: p.name, playerId: p.id },
+            { destination: "REMOTE" }
+          );
+        }
+      }
+
+      // Update previous value
+      prev[p.id] = rem;
+    }
+  }, [rows]);
 
   const start = async () => {
     const self = await readSelf();
@@ -241,7 +282,7 @@ const setDuration = async (mins: number, secs: number) => {
 })}
       </div>
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone sees updates instantly. Refreshing the page will reset your torch timer.</p>
+        Everyone sees updates instantly. Refreshing the page will reset your torch timer. :)</p>
     </div>
   );
 }
