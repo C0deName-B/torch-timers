@@ -67,10 +67,9 @@ function getClosestRemainingMs(players: PlayerRow[]): number | undefined {
 
 function formatBadge(ms: number): string {
   const total = Math.ceil(ms / 1000);
-  if (total < 60) return `${total}s`;            // under a minute: "42s"
   const m = Math.floor(total / 60);
-  if (m < 100) return `${m}m`;                   // "3m", "47m"
-  return "99+";                                  // avoid overflow on long timers
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 
@@ -88,13 +87,14 @@ async function writeSelf(update: Partial<TorchState>) {
 }
 
 export default function App() {
-  const [, forceTick] = useState(0);
+  const [tick, setTick] = useState(0);
   const [rows, setRows] = useState<PlayerRow[]>([]);
   const [minutesInput, setMinutesInput] = useState<number>(60);
   const [secondsInput, setSecondsInput] = useState<number>(0);
   const [isOpen, setIsOpen] = useState<boolean>(true);
-  const prevRemainingRef = useRef<Record<string, number>>({});
+  //const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set()); // dedupe cross-room
+  const lastBadgeRef = useRef<string | undefined>(undefined);
 
   async function refresh() {
     const self = await readSelf();
@@ -129,61 +129,38 @@ export default function App() {
       await OBR.notification.show(`💡 ${data.name}'s torch went out!`, "WARNING");
     });
     
-    const t = setInterval(() => forceTick((x) => x + 1), 500);
+    const t = setInterval(() => setTick((x) => x + 1), 500); // drives UI + badge
     return () => { offParty(); offPlayer(); offOpen(); offBroadcast();  clearInterval(t); };
   }, []);
 
-  useEffect(() => {
-    if (!OBR.isAvailable) return;
+useEffect(() => {
+  if (!OBR.isAvailable) return;
 
-    async function updateBadge() {
-      if (await OBR.action.isOpen()) {
-        await OBR.action.setBadgeText(undefined); // clear when open
-        return;
+  async function updateBadge() {
+    if (isOpen) {
+      if (lastBadgeRef.current !== undefined) {
+        await OBR.action.setBadgeText(undefined);
+        lastBadgeRef.current = undefined;
       }
+      return;
+    }
 
-      const closest = getClosestRemainingMs(rows);
-      if (closest === undefined) {
-        await OBR.action.setBadgeText(undefined); // nothing to show
+    const closest = getClosestRemainingMs(rows); // your helper
+    const next = closest === undefined ? undefined : formatBadge(closest); // e.g. "3:42" or "42s"
+
+    if (next !== lastBadgeRef.current) {
+      if (next === undefined) {
+        await OBR.action.setBadgeText(undefined);
       } else {
-        await OBR.action.setBadgeBackgroundColor("#d33"); // optional: reddish
-        await OBR.action.setBadgeText(formatBadge(closest));
+        await OBR.action.setBadgeBackgroundColor("rgba(240, 197, 116, 1)");
+        await OBR.action.setBadgeText(next);
       }
+      lastBadgeRef.current = next;
     }
-    updateBadge();
-  }, [rows, isOpen]); // re-run when timers change or the popover opens/closes
+  }
 
-    useEffect(() => {
-    if (!OBR.isAvailable) return;
-
-    const prev = prevRemainingRef.current;
-
-    for (const p of rows) {
-      const rem = getRemaining(p.torch);
-      const prevRem = prev[p.id] ?? rem;
-
-      // Edge trigger: was > 0, now <= 0 → fire once
-      if (prevRem > 0 && rem <= 0) {
-        const eventId = `${p.id}:${p.torch.durationMs}:${p.torch.startAt ?? 0}:${p.torch.offsetMs ?? 0}`;
-        if (!handledEventIdsRef.current.has(eventId)) {
-          handledEventIdsRef.current.add(eventId);
-
-          // Toast locally immediately
-          OBR.notification.show(`💡 ${p.name}'s torch went out!`, "WARNING");
-
-          // Tell everyone else (REMOTE → others only)
-          OBR.broadcast.sendMessage(
-            ALERT_CHANNEL,
-            { id: eventId, name: p.name, playerId: p.id },
-            { destination: "REMOTE" }
-          );
-        }
-      }
-
-      // Update previous value
-      prev[p.id] = rem;
-    }
-  }, [rows]);
+  updateBadge();
+}, [rows, isOpen, tick]);
 
   const start = async () => {
     const self = await readSelf();
@@ -282,7 +259,7 @@ const setDuration = async (mins: number, secs: number) => {
 })}
       </div>
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone sees updates instantly. Refreshing the page will reset your torch timer. :)</p>
+        Everyone sees updates instantly. Refreshing the page will reset your torch timer.</p>
     </div>
   );
 }
