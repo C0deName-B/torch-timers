@@ -211,17 +211,25 @@ function Controls(props: {
 }) {
   const { minutes, seconds, onMinutesChange, onSecondsChange } = props;
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    {/* Row 1: buttons */}
+    <div style={{ display: "flex", gap: 8 }}>
       <button onClick={props.onStart}>Start</button>
       <button onClick={props.onPause}>Pause</button>
+      <button title="Set & Restart" onClick={props.onSetDuration}>Set</button>
+    </div>
 
-      <span style={{ marginLeft: 6 }}>Duration:</span>
+    {/* Row 2: duration controls */}
+    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <span>Duration:</span>
 
       <input
         type="number"
         min={0}
         value={minutes}
-        onChange={(e) => onMinutesChange(Math.max(0, parseInt(e.target.value || "0", 10)))}
+        onChange={(e) =>
+          onMinutesChange(Math.max(0, parseInt(e.target.value || "0", 10)))
+        }
         style={{ width: 64 }}
         aria-label="Minutes"
       />
@@ -232,13 +240,17 @@ function Controls(props: {
         min={0}
         max={59}
         value={seconds}
-        onChange={(e) => onSecondsChange(Math.max(0, Math.min(59, parseInt(e.target.value || "0", 10))))}
+        onChange={(e) =>
+          onSecondsChange(
+            Math.max(0, Math.min(59, parseInt(e.target.value || "0", 10)))
+          )
+        }
         style={{ width: 64 }}
         aria-label="Seconds"
       />
       <span>sec</span>
-
-      <button title="Set & Restart" onClick={props.onSetDuration}>Set</button>
     </div>
-  );
+  </div>
+);
+
 }
