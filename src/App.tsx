@@ -6,6 +6,8 @@ const META_KEY = `${NAMESPACE}/torch` as const;
 const ALERT_CHANNEL = `${NAMESPACE}/alerts`;
 
 type TorchState = {
+  id?: string;            // NEW: stable id for deletes & event tracking
+  name?: string;          // NEW: display name
   durationMs: number;
   startAt?: number;
   pausedAt?: number;
@@ -17,6 +19,15 @@ type PlayerRow = { id: string; name: string; torches: TorchState[]; isSelf: bool
 const DEFAULT: TorchState = { durationMs: 60 * 60 * 1000, offsetMs: 0 };
 
 function now() { return Date.now(); }
+function newId() {
+  // Prefer crypto.randomUUID if available, else fallback
+  const g = globalThis as typeof globalThis;
+  return g?.crypto?.randomUUID ? g.crypto.randomUUID() : `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+function withId<T extends TorchState>(t: T): T {
+  return t.id ? t : { ...t, id: newId() };
+}
+
 function getElapsed(s: TorchState): number {
   const base = s.offsetMs ?? 0;
   if (s.startAt && !s.pausedAt) return base + (now() - s.startAt);
@@ -41,7 +52,9 @@ function isTorchState(value: unknown): value is TorchState {
     typeof v.durationMs === "number" &&
     (v.startAt === undefined || typeof v.startAt === "number") &&
     (v.pausedAt === undefined || typeof v.pausedAt === "number") &&
-    (v.offsetMs === undefined || typeof v.offsetMs === "number")
+    (v.offsetMs === undefined || typeof v.offsetMs === "number") &&
+    (v.id === undefined || typeof v.id === "string") &&
+    (v.name === undefined || typeof v.name === "string")
   );
 }
 function isTorchArray(value: unknown): value is TorchState[] {
@@ -53,10 +66,10 @@ function getTorchesFromMetadata(metadata: unknown): TorchState[] {
   if (typeof metadata === "object" && metadata !== null) {
     const rec = metadata as Record<string, unknown>;
     const raw = rec[META_KEY];
-    if (isTorchArray(raw)) return raw.length ? raw : [DEFAULT];
-    if (isTorchState(raw)) return [raw];
+    if (isTorchArray(raw)) return raw.length ? raw.map(withId) : [withId(DEFAULT)];
+    if (isTorchState(raw)) return [withId(raw)];
   }
-  return [DEFAULT];
+  return [withId(DEFAULT)];
 }
 
 function getClosestRemainingMs(players: PlayerRow[]): number | undefined {
@@ -89,7 +102,7 @@ async function readSelf(): Promise<{ id: string; name: string; torches: TorchSta
 async function writeSelfArray(updater: (prev: TorchState[]) => TorchState[]) {
   const metadata = await OBR.player.getMetadata();
   const prev = getTorchesFromMetadata(metadata);
-  const next = updater(prev);
+  const next = updater(prev).map(withId);
   await OBR.player.setMetadata({ [META_KEY]: next });
 }
 
@@ -98,6 +111,7 @@ export default function App() {
   const [rows, setRows] = useState<PlayerRow[]>([]);
   const [minutesInput, setMinutesInput] = useState<number>(60);
   const [secondsInput, setSecondsInput] = useState<number>(0);
+  const [nameInput, setNameInput] = useState<string>(""); // NEW: name before Set
   const [isOpen, setIsOpen] = useState<boolean>(true);
   const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set());
@@ -128,10 +142,11 @@ export default function App() {
 
     // 🔔 Receive alerts from others and toast locally
     const offBroadcast = OBR.broadcast.onMessage(ALERT_CHANNEL, async (evt) => {
-      const data = evt.data as { id: string; name: string; playerId: string } | undefined;
+      const data = evt.data as { id: string; name: string; playerId: string; timerName?: string } | undefined;
       if (!data || handledEventIdsRef.current.has(data.id)) return;
       handledEventIdsRef.current.add(data.id);
-      await OBR.notification.show(`💡 ${data.name}'s light source has diminished!`, "WARNING");
+      const label = data.timerName ? `${data.name}'s "${data.timerName}"` : `${data.name}'s light source`;
+      await OBR.notification.show(`💡 ${label} has diminished!`, "WARNING");
     });
 
     const t = setInterval(() => setTick((x) => x + 1), 500);
@@ -171,20 +186,22 @@ export default function App() {
     for (const p of rows) {
       p.torches.forEach((torch, idx) => {
         const rem = getRemaining(torch);
-        const key = `${p.id}:${idx}`;
+        const key = `${p.id}:${torch.id ?? idx}`; // prefer stable id
         const prevRem = prev[key] ?? rem;
 
         const crossedToZero = prevRem > 0 && rem <= 0;
         const wasActive = !!torch.startAt && !torch.pausedAt;
 
         if (crossedToZero && wasActive) {
-          const eventId = `${p.id}:${idx}:${torch.durationMs}:${torch.startAt ?? 0}:${torch.offsetMs ?? 0}`;
+          const eventId =
+            `${p.id}:${torch.id ?? idx}:${torch.durationMs}:${torch.startAt ?? 0}:${torch.offsetMs ?? 0}`;
           if (!handledEventIdsRef.current.has(eventId)) {
             handledEventIdsRef.current.add(eventId);
-            OBR.notification.show(`💡 ${p.name}'s light source has diminished!`, "WARNING");
+            const label = torch.name ? `${p.name}'s "${torch.name}"` : `${p.name}'s light source`;
+            OBR.notification.show(`💡 ${label} has diminished!`, "WARNING");
             OBR.broadcast.sendMessage(
               ALERT_CHANNEL,
-              { id: eventId, name: p.name, playerId: p.id },
+              { id: eventId, name: p.name, playerId: p.id, timerName: torch.name },
               { destination: "REMOTE" }
             );
           }
@@ -198,8 +215,8 @@ export default function App() {
   const start = async () => {
     // Start all paused timers; if none exist, create one from DEFAULT
     await writeSelfArray((prev) => {
-      const next = prev.length ? [...prev] : [DEFAULT];
-      return next.map((t) => {
+      const base = prev.length ? [...prev] : [withId(DEFAULT)];
+      return base.map((t) => {
         if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: now() };
         return { ...t, startAt: now(), pausedAt: undefined };
       });
@@ -212,19 +229,26 @@ export default function App() {
     );
   };
 
-  const setDuration = async (mins: number, secs: number) => {
+  const setDuration = async (mins: number, secs: number, name?: string) => {
     const m = Math.max(0, Math.floor(mins));
     const s = Math.max(0, Math.min(59, Math.floor(secs)));
     const totalSeconds = Math.max(1, m * 60 + s);
     await writeSelfArray((prev) => [
       ...prev,
-      {
+      withId({
+        name: (name ?? "").trim() || undefined,     // NEW: store provided name if non-empty
         durationMs: totalSeconds * 1000,
         offsetMs: 0,
         pausedAt: undefined,
         startAt: Date.now(), // start immediately
-      },
+      }),
     ]);
+    // optional: clear name input after creating
+    setNameInput("");
+  };
+
+  const deleteTorch = async (torchId: string) => {
+    await writeSelfArray((prev) => prev.filter((t) => (t.id ?? "") !== torchId));
   };
 
   return (
@@ -233,11 +257,13 @@ export default function App() {
       <Controls
         minutes={minutesInput}
         seconds={secondsInput}
+        name={nameInput}                               // NEW
         onMinutesChange={setMinutesInput}
         onSecondsChange={setSecondsInput}
+        onNameChange={setNameInput}                    // NEW
         onStart={start}
         onPause={pause}
-        onSetDuration={() => setDuration(minutesInput, secondsInput)}
+        onSetDuration={() => setDuration(minutesInput, secondsInput, nameInput)}
       />
 
       <div style={{ marginTop: 10, borderTop: "1px solid #ddd", paddingTop: 8 }}>
@@ -254,7 +280,7 @@ export default function App() {
 
               return (
                 <div
-                  key={`${p.id}:${idx}`}
+                  key={`${p.id}:${t.id ?? idx}`}
                   style={{
                     display: "grid",
                     gridTemplateColumns: "auto 1fr auto",
@@ -266,12 +292,27 @@ export default function App() {
                     alignItems: "center",
                   }}
                 >
-                  <div style={{ opacity: 0.7 }}>#{idx + 1}</div>
+                  <div style={{ opacity: 0.8, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 140 }}>
+                    {t.name ? t.name : `#${idx + 1}`}
+                  </div>
                   <div
                     title={running ? "burning" : expired ? "expired" : "paused"}
                     style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, textAlign: "right" }}
                   >
                     {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
+                  </div>
+
+                  {/* Delete (self only) */}
+                  <div>
+                    {p.isSelf && (
+                      <button
+                        title="Delete timer"
+                        onClick={() => deleteTorch(t.id ?? String(idx))}
+                        style={{ cursor: "pointer" }}
+                      >
+                        🗑️
+                      </button>
+                    )}
                   </div>
 
                   {/* Life gauge */}
@@ -308,7 +349,7 @@ export default function App() {
       </div>
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone is alerted when a light source diminishes. Refreshing the page will reset your torch timers.
+        Everyone is alerted when a light source diminishes. (Self can delete their own timers.)
       </p>
     </div>
   );
@@ -317,13 +358,15 @@ export default function App() {
 function Controls(props: {
   minutes: number;
   seconds: number;
+  name: string;                                  // NEW
   onMinutesChange: (m: number) => void;
   onSecondsChange: (s: number) => void;
+  onNameChange: (n: string) => void;             // NEW
   onStart: () => Promise<void>;
   onPause: () => Promise<void>;
   onSetDuration: () => Promise<void>;
 }) {
-  const { minutes, seconds, onMinutesChange, onSecondsChange } = props;
+  const { minutes, seconds, name, onMinutesChange, onSecondsChange, onNameChange } = props;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {/* Row 1: buttons */}
@@ -333,10 +376,19 @@ function Controls(props: {
         <button title="Add & Start new timer with duration" onClick={props.onSetDuration}>Set</button>
       </div>
 
-      {/* Row 2: duration controls */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span>Duration:</span>
+      {/* Row 2: name + duration controls */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span>Name:</span>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => onNameChange(e.target.value)}
+          placeholder="e.g., Torch, Lantern, Light spell"
+          style={{ width: 200 }}
+          aria-label="Timer name"
+        />
 
+        <span>Duration:</span>
         <input
           type="number"
           min={0}
