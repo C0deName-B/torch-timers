@@ -581,7 +581,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. 
-        v1.0.18
+        v1.0.20
       </p>
     </div>
   );
