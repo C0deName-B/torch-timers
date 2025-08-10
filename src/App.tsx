@@ -4,6 +4,7 @@ import OBR from "@owlbear-rodeo/sdk";
 const NAMESPACE = "com.brian.shadowdark-torches";
 const META_KEY = `${NAMESPACE}/torch` as const;
 
+
 type TorchState = {
   durationMs: number;
   startAt?: number;
@@ -107,19 +108,21 @@ export default function App() {
     const self = await readSelf();
     await writeSelf({ pausedAt: now(), offsetMs: getElapsed(self.torch), startAt: undefined });
   };
-  const reset = async () => {
-    await writeSelf({ startAt: undefined, pausedAt: undefined, offsetMs: 0 });
-  };
-  const setMinutes = async (mins: number) => {
-    const ms = Math.max(1, mins) * 60 * 1000;
-    const self = await readSelf();
-    await writeSelf({ durationMs: ms, offsetMs: getElapsed(self.torch) });
-  };
+
+const setMinutes = async (mins: number) => {
+  const ms = Math.max(1, mins) * 60 * 1000;
+  await writeSelf({
+    durationMs: ms,
+    offsetMs: 0,
+    pausedAt: undefined,
+    startAt: now(), // start immediately using new duration
+  });
+};
 
   return (
     <div className="p-3 text-sm" style={{ fontFamily: "system-ui, sans-serif" }}>
       <h2 style={{ fontSize: 18, margin: 0, marginBottom: 8 }}>Shadowdark Torch Timers</h2>
-      <Controls onStart={start} onPause={pause} onReset={reset} onSetMinutes={setMinutes} />
+      <Controls onStart={start} onPause={pause} onReset={() => writeSelf(DEFAULT)} onSetMinutes={setMinutes} />
       <div style={{ marginTop: 10, borderTop: "1px solid #ddd", paddingTop: 8 }}>
         {rows.map((p) => {
           const rem = getRemaining(p.torch);
