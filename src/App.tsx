@@ -71,6 +71,8 @@ async function writeSelf(update: Partial<TorchState>) {
 export default function App() {
   const [, forceTick] = useState(0);
   const [rows, setRows] = useState<PlayerRow[]>([]);
+  const [minutesInput, setMinutesInput] = useState<number>(60);
+  const [secondsInput, setSecondsInput] = useState<number>(0);
 
   async function refresh() {
     const self = await readSelf();
@@ -109,20 +111,32 @@ export default function App() {
     await writeSelf({ pausedAt: now(), offsetMs: getElapsed(self.torch), startAt: undefined });
   };
 
-const setMinutes = async (mins: number) => {
-  const ms = Math.max(1, mins) * 60 * 1000;
+const setDuration = async (mins: number, secs: number) => {
+  const m = Math.max(0, Math.floor(mins));
+  const s = Math.max(0, Math.min(59, Math.floor(secs))); // clamp 0–59
+  const totalSeconds = Math.max(1, m * 60 + s);          // at least 1s
   await writeSelf({
-    durationMs: ms,
+    durationMs: totalSeconds * 1000,
     offsetMs: 0,
     pausedAt: undefined,
-    startAt: now(), // start immediately using new duration
+    startAt: Date.now(), // start immediately
   });
 };
+
 
   return (
     <div className="p-3 text-sm" style={{ fontFamily: "system-ui, sans-serif" }}>
       <h2 style={{ fontSize: 18, margin: 0, marginBottom: 8 }}>Shadowdark Torch Timers</h2>
-      <Controls onStart={start} onPause={pause} onSetMinutes={setMinutes} />
+      <Controls
+  minutes={minutesInput}
+  seconds={secondsInput}
+  onMinutesChange={setMinutesInput}
+  onSecondsChange={setSecondsInput}
+  onStart={start}
+  onPause={pause}
+  onSetDuration={() => setDuration(minutesInput, secondsInput)}
+/>
+
       <div style={{ marginTop: 10, borderTop: "1px solid #ddd", paddingTop: 8 }}>
         {rows.map((p) => {
   const rem = getRemaining(p.torch);
@@ -181,31 +195,50 @@ const setMinutes = async (mins: number) => {
 })}
       </div>
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone sees updates instantly thanks to player metadata.
-      </p>
+        Everyone sees updates instantly. Refreshing the page will reset your torch timer.</p>
     </div>
   );
 }
 
 function Controls(props: {
+  minutes: number;
+  seconds: number;
+  onMinutesChange: (m: number) => void;
+  onSecondsChange: (s: number) => void;
   onStart: () => Promise<void>;
   onPause: () => Promise<void>;
-  onSetMinutes: (m: number) => Promise<void>;
+  onSetDuration: () => Promise<void>;
 }) {
-  const [mins, setMins] = useState(60);
+  const { minutes, seconds, onMinutesChange, onSecondsChange } = props;
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <button onClick={props.onStart}>Start</button>
       <button onClick={props.onPause}>Pause</button>
-      <span style={{ marginLeft: 6 }}>Duration (min):</span>
+
+      <span style={{ marginLeft: 6 }}>Duration:</span>
+
       <input
         type="number"
-        min={1}
-        value={mins}
-        onChange={(e) => setMins(parseInt(e.target.value || "1", 10))}
-        style={{ width: 70 }}
+        min={0}
+        value={minutes}
+        onChange={(e) => onMinutesChange(Math.max(0, parseInt(e.target.value || "0", 10)))}
+        style={{ width: 64 }}
+        aria-label="Minutes"
       />
-      <button onClick={() => props.onSetMinutes(mins)}>Set</button>
+      <span>min</span>
+
+      <input
+        type="number"
+        min={0}
+        max={59}
+        value={seconds}
+        onChange={(e) => onSecondsChange(Math.max(0, Math.min(59, parseInt(e.target.value || "0", 10))))}
+        style={{ width: 64 }}
+        aria-label="Seconds"
+      />
+      <span>sec</span>
+
+      <button title="Set & Restart" onClick={props.onSetDuration}>Set</button>
     </div>
   );
 }
