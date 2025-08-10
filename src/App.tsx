@@ -387,7 +387,8 @@ function Controls(props: {
           style={{ width: 200 }}
           aria-label="Timer name"
         />
-
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <span>Duration:</span>
         <input
           type="number"
