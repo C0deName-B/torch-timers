@@ -148,26 +148,34 @@ const setMinutes = async (mins: number) => {
         {format(rem)} {expired ? "⛔" : running ? "🔥" : "⏸️"}
       </div>
 
-      {/* Life-gauge bar spans both columns */}
-      <div style={{ gridColumn: "1 / -1" }}>
-        <div style={{
-          height: 10,
-          width: "100%",
-          background: "linear-gradient(90deg, #ffe9a3, #ffc163, #ff6a4a)",
-          borderRadius: 6,
-          position: "relative",
-          overflow: "hidden",
-          opacity: expired ? 0.4 : 1
-        }}>
-          <div style={{
-            position: "absolute",
-            top: 0, left: 0, bottom: 0,
-            width: `${pct}%`,
-            background: "rgba(0,0,0,0.15)", // masks to reveal depletion
-            transition: "width 300ms linear"
-          }} />
-        </div>
-      </div>
+      {/* Life gauge */}
+<div style={{ gridColumn: "1 / -1" }}>
+  <div
+    style={{
+      position: "relative",
+      height: 12,
+      width: "100%",
+      background: "linear-gradient(90deg, #ffe9a3, #ffc163, #ff6a4a)", // full flame, always visible
+      borderRadius: 8,
+      overflow: "hidden",
+      boxShadow: "inset 0 1px 2px rgba(0,0,0,0.25)"
+    }}
+  >
+    {/* Darkness overlay grows as time depletes */}
+    <div
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        bottom: 0,
+        width: `${100 - pct}%`,     // 0% at start, 100% when expired
+        background: "#000",         // pure black “darkness”
+        transition: "width 300ms linear"
+      }}
+    />
+  </div>
+</div>
+
     </div>
   );
 })}
