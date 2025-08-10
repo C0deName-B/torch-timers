@@ -175,9 +175,13 @@ export default function App() {
   const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set());
   const lastBadgeRef = useRef<string | undefined>(undefined);
+  const processedLightsRef = useRef<Set<string>>(new Set()); // prevent duplicate timer creation per imageId
 
-  const inputsRef = useRef({ m: minutesInput, s: secondsInput, name: nameInput });
-  useEffect(() => { inputsRef.current = { m: minutesInput, s: secondsInput, name: nameInput }; }, [minutesInput, secondsInput, nameInput]);
+
+const inputsRef = useRef({ m: minutesInput, s: secondsInput, name: nameInput });
+useEffect(() => {
+  inputsRef.current = { m: minutesInput, s: secondsInput, name: nameInput };
+}, [minutesInput, secondsInput, nameInput]);
 
   async function refresh() {
     const selfId = OBR.player.id;
@@ -252,33 +256,43 @@ export default function App() {
       return { added, removed, changed };
     }
 
-    async function ensureTimerForImage(imageId: string) {
-      const { m, s, name } = inputsRef.current;
-      const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
-      const ownerName = "Player"; // We don't know the placer here; keep generic.
+  async function ensureTimerForImage(imageId: string) {
+    // Prevent duplicates from echo/sync events
+    if (processedLightsRef.current.has(imageId)) return;
+    processedLightsRef.current.add(imageId);
 
-      await writeRoomTimers((prev) => {
-        // Idempotent: if we already have a timer for this imageId, do nothing.
-        if (prev.some((t) => t.lightId === imageId)) return prev;
-        return [
-          ...prev,
-          {
-            id: newId(),
-            name: (name ?? "").trim() || "Light",
-            durationMs: totalSeconds * 1000,
-            offsetMs: 0,
-            pausedAt: undefined,
-            startAt: Date.now(),
-            ownerName,
-            lightId: imageId,
-          },
-        ];
-      });
-    }
+    const { m, s, name } = inputsRef.current;
+    const totalSeconds = Math.max(
+      1,
+      Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s)))
+    );
 
-    async function removeTimersForImage(imageId: string) {
-      await writeRoomTimers((prev) => prev.filter((t) => t.lightId !== imageId));
-    }
+    const ownerName = await OBR.player.getName();
+    const ownerId = OBR.player.id;
+
+    await writeRoomTimers((prev) => {
+      // Also idempotent against already-synced metadata
+      if (prev.some((t) => t.lightId === imageId)) return prev;
+      return [
+        ...prev,
+        {
+          id: newId(),
+          name: (name ?? "").trim() || "Light",
+          durationMs: totalSeconds * 1000,
+          offsetMs: 0,
+          pausedAt: undefined,
+          startAt: Date.now(),
+          ownerName,
+          ownerId,
+          lightId: imageId,
+        },
+      ];
+    });
+  }
+
+  async function removeTimersForImage(imageId: string) {
+    await writeRoomTimers((prev) => prev.filter((t) => t.lightId !== imageId));
+  }
 
     const offItems = OBR.scene.items.onChange(async (items: Item[]) => {
       for (const it of items) {
@@ -343,18 +357,16 @@ export default function App() {
     const prev = prevRemainingRef.current;
 
     async function removeDynamicLightFlag(imageId: string) {
-      try {
-        await OBR.scene.items.updateItems([imageId], (items) =>
-          items.map((it) => {
-            const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
-            delete meta[DYN_LIGHT_KEY];
-            return { ...it, metadata: meta };
-          })
-        );
-      } catch {
-        /* noop */
+    try {
+          await OBR.scene.items.updateItems([imageId], (items) =>
+            items.map((it) => {
+              const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
+              delete meta[DYN_LIGHT_KEY];
+              return { ...it, metadata: meta };
+            })
+          );
+        } catch { /* swallow errors */ }
       }
-    }
 
     for (const p of rows) {
       p.torches.forEach((torch, idx) => {
@@ -556,7 +568,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.1.21 (dynamic-fog metadata mode)
+        v1.1.22 (dynamic-fog metadata mode)
       </p>
     </div>
   );
