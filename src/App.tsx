@@ -15,11 +15,16 @@ export type TorchState = {
   offsetMs?: number;
 };
 
+// Room-wide shared timer (not keyed by player id)
+type RoomTimer = TorchState & {
+  id: string; // required at storage time
+  ownerId?: string; // may be ephemeral; used when available
+  ownerName: string; // display label; persists if owner disconnects/changes id
+};
+
 export type PlayerRow = { id: string; name: string; torches: TorchState[]; isSelf: boolean };
 
 const DEFAULT: TorchState = { durationMs: 60 * 60 * 1000, offsetMs: 0 };
-
-type RoomTorches = Record<string, TorchState[]>; // playerId -> torches
 
 // === Time utilities ===
 function now() { return Date.now(); }
@@ -58,7 +63,8 @@ function isTorchState(value: unknown): value is TorchState {
 }
 function isTorchArray(value: unknown): value is TorchState[] { return Array.isArray(value) && value.every(isTorchState); }
 
-function isRoomTorches(value: unknown): value is RoomTorches {
+// Back-compat detector: old shape was Record<playerId, TorchState[]>
+function isOldRoomTorches(value: unknown): value is Record<string, TorchState[]> {
   if (typeof value !== "object" || value === null) return false;
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     if (typeof k !== "string" || !isTorchArray(v)) return false;
@@ -66,26 +72,54 @@ function isRoomTorches(value: unknown): value is RoomTorches {
   return true;
 }
 
+function isRoomTimer(value: unknown): value is RoomTimer {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.id === "string" &&
+    typeof v.ownerName === "string" &&
+    typeof v.durationMs === "number" &&
+    (v.startAt === undefined || typeof v.startAt === "number") &&
+    (v.pausedAt === undefined || typeof v.pausedAt === "number") &&
+    (v.offsetMs === undefined || typeof v.offsetMs === "number") &&
+    (v.ownerId === undefined || typeof v.ownerId === "string") &&
+    (v.name === undefined || typeof v.name === "string")
+  );
+}
+function isRoomTimerArray(value: unknown): value is RoomTimer[] { return Array.isArray(value) && value.every(isRoomTimer); }
+
 // === Metadata helpers (room-scoped) ===
-async function readRoomTorches(): Promise<RoomTorches> {
+async function readRoomTimers(): Promise<RoomTimer[]> {
   const metadata = await OBR.room.getMetadata();
   const raw = (metadata as Record<string, unknown>)[META_KEY];
-  if (isRoomTorches(raw)) {
-    // normalize ids
-    const normalized: RoomTorches = {};
-    for (const [pid, arr] of Object.entries(raw)) normalized[pid] = arr.map(withId);
-    return normalized;
+
+  // New format
+  if (isRoomTimerArray(raw)) return raw.map((t) => ({ ...t, id: t.id || newId() }));
+
+  // Migrate from old format if present
+  if (isOldRoomTorches(raw)) {
+    const migrated: RoomTimer[] = [];
+    for (const [ownerId, arr] of Object.entries(raw)) {
+      for (const t of arr) {
+        const tt = withId(t);
+        migrated.push({
+          ...tt,
+          id: tt.id!,
+          ownerId,
+          ownerName: "Player",
+        });
+      }
+    }
+    return migrated;
   }
-  return {};
+
+  return [];
 }
 
-async function writeRoomTorches(updater: (prev: RoomTorches) => RoomTorches): Promise<void> {
-  const prev = await readRoomTorches();
-  const next = updater(prev);
-  // ensure all timers have ids
-  const normalized: RoomTorches = {};
-  for (const [pid, arr] of Object.entries(next)) normalized[pid] = (arr ?? []).map(withId);
-  await OBR.room.setMetadata({ [META_KEY]: normalized });
+async function writeRoomTimers(updater: (prev: RoomTimer[]) => RoomTimer[]): Promise<void> {
+  const prev = await readRoomTimers();
+  const next = updater(prev).map((t) => ({ ...t, id: t.id || newId(), ownerName: t.ownerName || "Player" }));
+  await OBR.room.setMetadata({ [META_KEY]: next });
 }
 
 function getClosestRemainingMs(players: PlayerRow[]): number | undefined {
@@ -121,19 +155,34 @@ export default function App() {
   async function refresh() {
     const selfId = OBR.player.id;
     const selfName = await OBR.player.getName();
-    const others = await OBR.party.getPlayers();
-    const roomMap = await readRoomTorches();
+    const party = await OBR.party.getPlayers();
+    const timers = await readRoomTimers();
 
-    const merged: PlayerRow[] = [
-      { id: selfId, name: selfName, torches: roomMap[selfId] ?? [withId(DEFAULT)], isSelf: true },
-      ...others.map((p) => ({
-        id: p.id,
-        name: p.name,
-        torches: roomMap[p.id] ?? [withId(DEFAULT)],
-        isSelf: false,
-      })),
-    ];
-    setRows(merged);
+    // Build a lookup for live party names by id
+    const nameById = new Map<string, string>();
+    party.forEach((p) => nameById.set(p.id, p.name));
+
+    // Group timers by owner. Use current party name if available; else use stored ownerName.
+    const rowsMap = new Map<string, PlayerRow>();
+    for (const t of timers) {
+      const ownerKey = t.ownerId ?? `name:${t.ownerName}`;
+      const displayName = t.ownerId ? (nameById.get(t.ownerId) ?? t.ownerName) : t.ownerName;
+      let row = rowsMap.get(ownerKey);
+      if (!row) {
+        row = { id: ownerKey, name: displayName, torches: [], isSelf: true /* allow delete on all */ };
+        rowsMap.set(ownerKey, row);
+      } else if (row.name !== displayName) {
+        row.name = displayName;
+      }
+      row.torches.push(t);
+    }
+
+    // Ensure current player row exists even if they have no timers yet (optional)
+    if (!rowsMap.size) {
+      rowsMap.set(selfId, { id: selfId, name: selfName, torches: [], isSelf: true });
+    }
+
+    setRows(Array.from(rowsMap.values()));
   }
 
   // === Effects ===
@@ -217,62 +266,46 @@ export default function App() {
     }
   }, [rows, tick]);
 
-  // === Controls (now room-shared) ===
+  // === Controls (room-shared over flat array) ===
   const start = async () => {
-    // Start all paused/created timers across the room (shared control)
-    await writeRoomTorches((prev) => {
-      const next: RoomTorches = {};
-      for (const [pid, arr] of Object.entries(prev)) {
-        next[pid] = (arr ?? []).map((t) => {
-          if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: now() };
-          return { ...t, startAt: now(), pausedAt: undefined };
-        });
-      }
-      return next;
-    });
+    const startedAt = now();
+    await writeRoomTimers((prev) => prev.map((t) => {
+      if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: startedAt };
+      return { ...t, startAt: startedAt, pausedAt: undefined };
+    }));
   };
 
   const pause = async () => {
-    // Pause ALL timers across the room
     const at = now();
-    await writeRoomTorches((prev) => {
-      const next: RoomTorches = {};
-      for (const [pid, arr] of Object.entries(prev)) {
-        next[pid] = (arr ?? []).map((t) => ({ ...t, pausedAt: at, offsetMs: getElapsed(t), startAt: undefined }));
-      }
-      return next;
-    });
+    await writeRoomTimers((prev) => prev.map((t) => ({ ...t, pausedAt: at, offsetMs: getElapsed(t), startAt: undefined })));
   };
 
   const setDuration = async (mins: number, secs: number, name?: string) => {
     const m = Math.max(0, Math.floor(mins));
     const s = Math.max(0, Math.min(59, Math.floor(secs)));
     const totalSeconds = Math.max(1, m * 60 + s);
-    const selfId = OBR.player.id;
+    const ownerId = OBR.player.id;
+    const ownerName = await OBR.player.getName();
 
-    await writeRoomTorches((prev) => {
-      const arr = prev[selfId] ? [...prev[selfId]] : [];
-      arr.push(
-        withId({
-          name: (name ?? "").trim() || undefined,
-          durationMs: totalSeconds * 1000,
-          offsetMs: 0,
-          pausedAt: undefined,
-          startAt: now(),
-        })
-      );
-      return { ...prev, [selfId]: arr };
-    });
+    await writeRoomTimers((prev) => [
+      ...prev,
+      {
+        id: newId(),
+        name: (name ?? "").trim() || undefined,
+        durationMs: totalSeconds * 1000,
+        offsetMs: 0,
+        pausedAt: undefined,
+        startAt: now(),
+        ownerId,
+        ownerName,
+      },
+    ]);
 
     setNameInput("");
   };
 
   const deleteTorch = async (torchId: string) => {
-    const selfId = OBR.player.id;
-    await writeRoomTorches((prev) => {
-      const arr = (prev[selfId] ?? []).filter((t) => (t.id ?? "") !== torchId);
-      return { ...prev, [selfId]: arr };
-    });
+    await writeRoomTimers((prev) => prev.filter((t) => t.id !== torchId));
   };
 
   // === UI (unchanged) ===
@@ -393,8 +426,8 @@ export default function App() {
       </div>
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone is alerted when a light source diminishes.
-        v1.0.16
+        Everyone is alerted when a light source diminishes. 
+        v1.0.17
       </p>
     </div>
   );
