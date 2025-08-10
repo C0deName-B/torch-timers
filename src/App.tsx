@@ -126,7 +126,7 @@ export default function App() {
       if (!data || handledEventIdsRef.current.has(data.id)) return;
       handledEventIdsRef.current.add(data.id);
 
-      await OBR.notification.show(`💡 ${data.name}'s torch went out!`, "WARNING");
+      await OBR.notification.show(`💡 ${data.name}'s light source has diminished!`, "WARNING");
     });
     
     const t = setInterval(() => setTick((x) => x + 1), 500); // drives UI + badge
@@ -182,7 +182,7 @@ useEffect(() => {
         handledEventIdsRef.current.add(eventId);
 
         // Toast locally
-        OBR.notification.show(`💡 ${p.name}'s torch went out!`, "WARNING");
+        OBR.notification.show(`💡 ${p.name}'s light source has diminished!`, "WARNING");
 
         // Tell everyone else
         OBR.broadcast.sendMessage(
@@ -296,7 +296,7 @@ const setDuration = async (mins: number, secs: number) => {
 })}
       </div>
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        Everyone sees updates instantly. Refreshing the page will reset your torch timer.</p>
+        Everyone is alerted when a light source diminished. Refreshing the page will reset your torch timer.</p>
     </div>
   );
 }
