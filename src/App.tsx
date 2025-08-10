@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import OBR from "@owlbear-rodeo/sdk";
+import type { Item } from "@owlbear-rodeo/sdk";
+
 
 const NAMESPACE = "com.brian.shadowdark-torches";
 const META_KEY = `${NAMESPACE}/torch` as const;
@@ -20,6 +22,7 @@ type RoomTimer = TorchState & {
   id: string; // required at storage time
   ownerId?: string; // may be ephemeral; used when available
   ownerName: string; // display label; persists if owner disconnects/changes id
+  lightId: string; // unique id for this light source, used for event tracking
 };
 
 export type PlayerRow = { id: string; name: string; torches: TorchState[]; isSelf: boolean };
@@ -32,7 +35,6 @@ function newId() {
   const g = globalThis as typeof globalThis;
   return g?.crypto?.randomUUID ? g.crypto.randomUUID() : `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
-function withId<T extends TorchState>(t: T): T { return t.id ? t : { ...t, id: newId() }; }
 
 function getElapsed(s: TorchState): number {
   const base = s.offsetMs ?? 0;
@@ -48,29 +50,7 @@ function format(ms: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-// === Runtime validators (defensive against malformed metadata) ===
-function isTorchState(value: unknown): value is TorchState {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.durationMs === "number" &&
-    (v.startAt === undefined || typeof v.startAt === "number") &&
-    (v.pausedAt === undefined || typeof v.pausedAt === "number") &&
-    (v.offsetMs === undefined || typeof v.offsetMs === "number") &&
-    (v.id === undefined || typeof v.id === "string") &&
-    (v.name === undefined || typeof v.name === "string")
-  );
-}
-function isTorchArray(value: unknown): value is TorchState[] { return Array.isArray(value) && value.every(isTorchState); }
 
-// Back-compat detector: old shape was Record<playerId, TorchState[]>
-function isOldRoomTorches(value: unknown): value is Record<string, TorchState[]> {
-  if (typeof value !== "object" || value === null) return false;
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof k !== "string" || !isTorchArray(v)) return false;
-  }
-  return true;
-}
 
 function isRoomTimer(value: unknown): value is RoomTimer {
   if (typeof value !== "object" || value === null) return false;
@@ -83,9 +63,12 @@ function isRoomTimer(value: unknown): value is RoomTimer {
     (v.pausedAt === undefined || typeof v.pausedAt === "number") &&
     (v.offsetMs === undefined || typeof v.offsetMs === "number") &&
     (v.ownerId === undefined || typeof v.ownerId === "string") &&
-    (v.name === undefined || typeof v.name === "string")
+    (v.name === undefined || typeof v.name === "string") &&
+    (v.lightId === undefined || typeof v.lightId === "string")
   );
 }
+
+
 function isRoomTimerArray(value: unknown): value is RoomTimer[] { return Array.isArray(value) && value.every(isRoomTimer); }
 
 // === Metadata helpers (room-scoped) ===
@@ -93,25 +76,7 @@ async function readRoomTimers(): Promise<RoomTimer[]> {
   const metadata = await OBR.room.getMetadata();
   const raw = (metadata as Record<string, unknown>)[META_KEY];
 
-  // New format
   if (isRoomTimerArray(raw)) return raw.map((t) => ({ ...t, id: t.id || newId() }));
-
-  // Migrate from old format if present
-  if (isOldRoomTorches(raw)) {
-    const migrated: RoomTimer[] = [];
-    for (const [ownerId, arr] of Object.entries(raw)) {
-      for (const t of arr) {
-        const tt = withId(t);
-        migrated.push({
-          ...tt,
-          id: tt.id!,
-          ownerId,
-          ownerName: "Player",
-        });
-      }
-    }
-    return migrated;
-  }
 
   return [];
 }
@@ -151,6 +116,12 @@ export default function App() {
   const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set());
   const lastBadgeRef = useRef<string | undefined>(undefined);
+  
+  const inputsRef = useRef({ m: minutesInput, s: secondsInput, name: nameInput });
+  useEffect(() => {
+  inputsRef.current = { m: minutesInput, s: secondsInput, name: nameInput };
+}, [minutesInput, secondsInput, nameInput]);
+
 
   async function refresh() {
     const selfId = OBR.player.id;
@@ -208,6 +179,52 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+  if (!OBR.isAvailable) return;
+
+  const seen = new Set<string>();
+
+  // Seed with current local items so we only react to *new* lights
+  (async () => {
+    try {
+      const local = await OBR.scene.local.getItems();
+      local.forEach((it: Item) => seen.add(it.id));
+    } catch {/*itnore errors*/}
+  })();
+
+  // React to new local LIGHT items
+  const offLocal = OBR.scene.local.onChange(async (items) => {
+    const lights = items.filter((it: Item) => it.type === "LIGHT");
+    for (const light of lights) {
+      if (seen.has(light.id)) continue;
+      seen.add(light.id);
+
+      // snapshot current inputs
+      const { m, s, name } = inputsRef.current;
+      const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
+      const ownerId = OBR.player.id;
+      const ownerName = await OBR.player.getName();
+
+      await writeRoomTimers((prev) => [
+        ...prev,
+        {
+          id: newId(),
+          name: (name ?? "").trim() || "Light",
+          durationMs: totalSeconds * 1000,
+          offsetMs: 0,
+          pausedAt: undefined,
+          startAt: Date.now(),
+          ownerId,
+          ownerName,
+          lightId: light.id, // ← link timer to the light
+        },
+      ]);
+    }
+  });
+
+  return () => offLocal();
+}, []);
+
+  useEffect(() => {
     if (!OBR.isAvailable) return;
     async function updateBadge() {
       if (isOpen) {
@@ -258,6 +275,24 @@ export default function App() {
               { id: eventId, name: p.name, playerId: p.id, timerName: torch.name },
               { destination: "REMOTE" }
             );
+
+            (async () => {
+              if (isRoomTimer(torch)) {
+                const lightId = torch.lightId; // OK
+                // delete local light if owner
+                if (lightId && p.id === OBR.player.id) {
+                  try {
+                    await OBR.scene.local.deleteItems([lightId]);
+                  } catch {
+                    /* noop */
+                  }
+                }
+
+                // remove the expired timer
+                await writeRoomTimers(prev => prev.filter(t => t.id !== torch.id));
+              }
+            })();
+
           }
         }
 
@@ -270,6 +305,7 @@ export default function App() {
   const start = async () => {
     const startedAt = now();
     await writeRoomTimers((prev) => prev.map((t) => {
+      if(isRunning(t)) return t; 
       if (getRemaining(t) <= 0) return { ...t, offsetMs: 0, pausedAt: undefined, startAt: startedAt };
       return { ...t, startAt: startedAt, pausedAt: undefined };
     }));
@@ -298,6 +334,7 @@ export default function App() {
         startAt: now(),
         ownerId,
         ownerName,
+        lightId: ""
       },
     ]);
 
