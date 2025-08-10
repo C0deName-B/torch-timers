@@ -55,6 +55,25 @@ function getTorchFromMetadata(metadata: unknown): TorchState {
   return DEFAULT;
 }
 
+function getClosestRemainingMs(players: PlayerRow[]): number | undefined {
+  let best: number | undefined;
+  for (const p of players) {
+    if (!isRunning(p.torch)) continue;
+    const r = getRemaining(p.torch);
+    if (r > 0 && (best === undefined || r < best)) best = r;
+  }
+  return best;
+}
+
+function formatBadge(ms: number): string {
+  const total = Math.ceil(ms / 1000);
+  if (total < 60) return `${total}s`;            // under a minute: "42s"
+  const m = Math.floor(total / 60);
+  if (m < 100) return `${m}m`;                   // "3m", "47m"
+  return "99+";                                  // avoid overflow on long timers
+}
+
+
 async function readSelf(): Promise<{ id: string; name: string; torch: TorchState }> {
   const id = OBR.player.id;
   const name = await OBR.player.getName();
@@ -73,6 +92,7 @@ export default function App() {
   const [rows, setRows] = useState<PlayerRow[]>([]);
   const [minutesInput, setMinutesInput] = useState<number>(60);
   const [secondsInput, setSecondsInput] = useState<number>(0);
+  const [isOpen, setIsOpen] = useState<boolean>(true);
 
   async function refresh() {
     const self = await readSelf();
@@ -91,12 +111,38 @@ export default function App() {
 
   useEffect(() => {
     if (!OBR.isAvailable) return;
+
     refresh();
-    const offParty = OBR.party.onChange(refresh);
+
+    const offParty  = OBR.party.onChange(refresh);
     const offPlayer = OBR.player.onChange(refresh);
+    const offOpen   = OBR.action.onOpenChange(setIsOpen); // <— NEW
+
     const t = setInterval(() => forceTick((x) => x + 1), 500);
-    return () => { offParty(); offPlayer(); clearInterval(t); };
+
+    return () => { offParty(); offPlayer(); offOpen(); clearInterval(t); };
   }, []);
+
+  useEffect(() => {
+    if (!OBR.isAvailable) return;
+
+    async function updateBadge() {
+      if (await OBR.action.isOpen()) {
+        await OBR.action.setBadgeText(undefined); // clear when open
+        return;
+      }
+
+      const closest = getClosestRemainingMs(rows);
+      if (closest === undefined) {
+        await OBR.action.setBadgeText(undefined); // nothing to show
+      } else {
+        await OBR.action.setBadgeBackgroundColor("#d33"); // optional: reddish
+        await OBR.action.setBadgeText(formatBadge(closest));
+      }
+    }
+    updateBadge();
+  }, [rows, isOpen]); // re-run when timers change or the popover opens/closes
+
 
   const start = async () => {
     const self = await readSelf();
@@ -254,3 +300,5 @@ function Controls(props: {
 );
 
 }
+
+
