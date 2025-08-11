@@ -6,9 +6,11 @@ const NAMESPACE = "com.brian.shadowdark-torches";
 const META_KEY = `${NAMESPACE}/torch` as const;
 const ALERT_CHANNEL = `${NAMESPACE}/alerts`;
 const DYN_LIGHT_KEY = "rodeo.owlbear.dynamic-fog/light";
-const LINK_KEY = `${NAMESPACE}/light-link`; 
+const LINK_ROOM_KEY = `${NAMESPACE}/light-locks` as const;
 
 // === Types ===
+type LightLocks = Record<string, string>; // imageId -> claimId
+
 export type TorchState = {
   id?: string; // stable id for deletes & event tracking
   name?: string; // display name
@@ -17,8 +19,6 @@ export type TorchState = {
   pausedAt?: number;
   offsetMs?: number;
 };
-
-type LightLink = { id: string; at: number };
 
 // Room-wide shared timer (not keyed by player id)
 type RoomTimer = TorchState & {
@@ -32,10 +32,8 @@ export type PlayerRow = { id: string; name: string; torches: TorchState[]; isSel
 
 const DEFAULT: TorchState = { durationMs: 60 * 60 * 1000, offsetMs: 0 };
 
-function isLightLink(x: unknown): x is LightLink {
-  if (typeof x !== "object" || x === null) return false;
-  const v = x as Record<string, unknown>;
-  return typeof v.id === "string" && typeof v.at === "number";
+function isLightLocks(x: unknown): x is LightLocks {
+  return !!x && typeof x === "object";
 }
 
 function now() { return Date.now(); }
@@ -205,41 +203,45 @@ export default function App() {
       ?? `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  // Try to claim the right to create a timer for this IMAGE.
-  // Returns the lock id if we won, or undefined if another client beat us to it.
-  async function tryClaimLightLock(imageId: string): Promise<string | undefined> {
-    const claimId = uuid();
-    console.log("[lock] attempt", { imageId, claimId });
+async function readRoomLocks(): Promise<LightLocks> {
+  const meta = await OBR.room.getMetadata();
+  const raw = (meta as Record<string, unknown>)[LINK_ROOM_KEY];
+  return isLightLocks(raw) ? (raw as LightLocks) : {};
+}
 
-    await OBR.scene.items.updateItems([imageId], (items) =>
-      items.map((it) => {
-        const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
-        if (!meta[LINK_KEY]) {
-          meta[LINK_KEY] = { id: claimId, at: Date.now() } as LightLink;
-        }
-        return { ...it, metadata: meta };
-      })
-    );
+async function writeRoomLocks(mut: (prev: LightLocks) => LightLocks): Promise<LightLocks> {
+  const prev = await readRoomLocks();
+  const next = mut({ ...prev });
+  await OBR.room.setMetadata({ [LINK_ROOM_KEY]: next });
+  return next;
+}
 
-    const [after] = await OBR.scene.items.getItems([imageId]);
-    const meta: Record<string, unknown> = (after?.metadata ?? {});
-    const link = meta[LINK_KEY];
-    const current = isLightLink(link) ? link.id : undefined;
+// Try to claim the right to create a timer for this IMAGE.
+// Returns the claim id if we won, undefined if someone else already claimed.
+async function tryClaimLightLock(imageId: string): Promise<string | undefined> {
+  const claimId = uuid();
+  console.log("[lock-room] attempt", { imageId, claimId });
 
-    console.log("[lock] read-back", { imageId, current, mine: claimId });
-    return current === claimId ? claimId : undefined;
-  }
+  await writeRoomLocks((locks) => {
+    if (!locks[imageId]) locks[imageId] = claimId; // only set if absent
+    return locks;
+  });
 
+  // Read back to see who actually holds it (handles races; last writer wins)
+  const after = await readRoomLocks();
+  const current = after[imageId];
+  console.log("[lock-room] read-back", { imageId, current, mine: claimId });
 
-  async function clearLightLock(imageId: string) {
-    await OBR.scene.items.updateItems([imageId], (items) =>
-      items.map((it) => {
-        const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
-        delete meta[LINK_KEY];
-        return { ...it, metadata: meta };
-      })
-    );
-  }
+  return current === claimId ? claimId : undefined;
+}
+
+async function clearLightLock(imageId: string) {
+  await writeRoomLocks((locks) => {
+    if (locks[imageId]) delete locks[imageId];
+    return locks;
+  });
+}
+
   async function refresh() {
     const selfId = OBR.player.id;
     const selfName = await OBR.player.getName();
@@ -314,23 +316,23 @@ export default function App() {
     }
 
     async function ensureTimerForImage(imageId: string) {
-      // 1) Swallow the immediate echo locally
-      console.debug("[lights] ensureTimerForImage start", imageId);
+      console.log("[lights] ensureTimerForImage start", imageId);
+
+      // swallow immediate echo on this client only
       if (recentlyProcessed(imageId)) {
-        console.debug("[lights] swallowed as recent", imageId);
+        console.log("[lights] swallowed as recent", imageId);
         return;
       }
 
-      // 2) Cross-client dedupe: only the winner proceeds
+      // cross-client dedupe
       const claimed = await tryClaimLightLock(imageId);
       if (!claimed) {
-        console.debug("[lock] lost claim, skipping timer", imageId);
+        console.log("[lock-room] lost claim, skipping timer", imageId);
         return;
       }
-      console.debug("[lock] won claim, creating timer", imageId);
-      const before = await readRoomTimers();
-      
-      // 3) Add timer (keep idempotence as a safety net)
+      console.log("[lock-room] won claim, creating timer", imageId);
+
+      // create the timer (still keep idempotence guard)
       const { m, s, name } = inputsRef.current;
       const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
       const ownerName = await OBR.player.getName();
@@ -353,17 +355,7 @@ export default function App() {
           },
         ];
       });
-
-      const after = await readRoomTimers();
-      const created = after.length > before.length;
-      console.log("[timer] create result", { imageId, created, total: after.length });
     }
-
-
-
-  async function removeTimersForImage(imageId: string) {
-    await writeRoomTimers((prev) => prev.filter((t) => t.lightId !== imageId));
-  }
 
     const offItems = OBR.scene.items.onChange(async (items: Item[]) => {
       for (const it of items) {
@@ -381,12 +373,12 @@ export default function App() {
         // React specifically to dynamic-fog light metadata being toggled on IMAGEs
         if (it.type === "IMAGE") {
           if (added.includes(DYN_LIGHT_KEY)) {
-            console.debug("[lights] added on", it.id);
+            console.log("[lights] added on", it.id);
             await ensureTimerForImage(it.id);
           }
           if (removed.includes(DYN_LIGHT_KEY)) {
-            await removeTimersForImage(it.id);
-            await clearLightLock(it.id); // allow future re-lights to create timers again
+            await writeRoomTimers((prev) => prev.filter((t) => t.lightId !== it.id));
+            await clearLightLock(it.id); // allow future re-lights on this image
           }
         }
 
@@ -429,17 +421,6 @@ export default function App() {
 
     const prev = prevRemainingRef.current;
 
-    async function removeDynamicLightFlag(imageId: string) {
-    try {
-          await OBR.scene.items.updateItems([imageId], (items) =>
-          items.map((it) => {
-            const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
-            delete meta[DYN_LIGHT_KEY];
-            return { ...it, metadata: meta };
-          })
-        );
-        } catch { /* swallow errors */ }
-      }
 
     for (const p of rows) {
       p.torches.forEach((torch, idx) => {
@@ -463,14 +444,14 @@ export default function App() {
             );
 
             (async () => {
-              // If this timer is linked to a dynamic-fog light, remove its key from the image
               if (isRoomTimer(torch) && torch.lightId) {
-                await removeDynamicLightFlag(torch.lightId);
+                // Optional: also remove the fog light
+                // await removeDynamicLightFlag(torch.lightId);
                 await clearLightLock(torch.lightId);
               }
-              // Then remove the expired timer itself
-              await writeRoomTimers((prevTimers) => prevTimers.filter((t) => t.id !== torch.id));
+              await writeRoomTimers((prev) => prev.filter((t) => t.id !== torch.id));
             })();
+
           }
         }
 
@@ -642,7 +623,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.26 (dynamic-fog metadata mode)
+        v1.0.27 (dynamic-fog metadata mode)
       </p>
     </div>
   );
