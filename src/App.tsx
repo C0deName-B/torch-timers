@@ -179,7 +179,10 @@ export default function App() {
   const prevRemainingRef = useRef<Record<string, number>>({});
   const handledEventIdsRef = useRef<Set<string>>(new Set());
   const lastBadgeRef = useRef<string | undefined>(undefined);
-  
+  // Track WHEN each item was newly selected by THIS client
+  const selectedAtRef = useRef<Map<string, number>>(new Map());
+  const prevSelectionRef = useRef<Set<string>>(new Set());
+
   const inputsRef = useRef({ m: minutesInput, s: secondsInput, name: nameInput });
   useEffect(() => {
     inputsRef.current = { m: minutesInput, s: secondsInput, name: nameInput };
@@ -201,6 +204,15 @@ export default function App() {
   function uuid() {
     return globalThis.crypto?.randomUUID?.()
       ?? `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function iLikelyPlaced(imageId: string, windowMs = 1500) {
+    const at = selectedAtRef.current.get(imageId);
+    return !!at && (Date.now() - at) < windowMs;
+  }
+
+  function sleep(ms: number) {
+    return new Promise((res) => setTimeout(res, ms));
   }
 
 async function readRoomLocks(): Promise<LightLocks> {
@@ -275,6 +287,21 @@ async function clearLightLock(imageId: string) {
   }
 
   // === Base effects ===
+  // Watch my selection and timestamp NEW selections
+  useEffect(() => {
+    if (!OBR.isAvailable) return;
+    return OBR.player.onChange((player) => {
+      const next = new Set(player.selection ?? []);
+      // items newly selected now
+      for (const id of next) {
+        if (!prevSelectionRef.current.has(id)) {
+          selectedAtRef.current.set(id, Date.now());
+        }
+      }
+      prevSelectionRef.current = next;
+    });
+  }, []);
+
   useEffect(() => {
     if (!OBR.isAvailable) return;
     refresh();
@@ -322,6 +349,12 @@ async function clearLightLock(imageId: string) {
       if (recentlyProcessed(imageId)) {
         console.log("[lights] swallowed as recent", imageId);
         return;
+      }
+
+      // Placer bias: if I didn't just select this item, wait a bit
+      const iAmPlacer = iLikelyPlaced(imageId);
+      if (!iAmPlacer) {
+        await sleep(500); // ← tweak 300–700ms; 500ms is a good default
       }
 
       // cross-client dedupe
@@ -623,7 +656,7 @@ async function clearLightLock(imageId: string) {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.27 (dynamic-fog metadata mode)
+        v1.0.28 (dynamic-fog metadata mode)
       </p>
     </div>
   );
