@@ -215,6 +215,10 @@ export default function App() {
     return new Promise((res) => setTimeout(res, ms));
   }
 
+  function jitter(ms: number, spread = 200) {
+    return ms + Math.floor(Math.random() * spread);
+  }
+
 async function readRoomLocks(): Promise<LightLocks> {
   const meta = await OBR.room.getMetadata();
   const raw = (meta as Record<string, unknown>)[LINK_ROOM_KEY];
@@ -342,53 +346,67 @@ async function clearLightLock(imageId: string) {
       return { added, removed, changed };
     }
 
-    async function ensureTimerForImage(imageId: string) {
-      console.log("[lights] ensureTimerForImage start", imageId);
+  async function ensureTimerForImage(imageId: string) {
+    console.log("[lights] ensureTimerForImage start", imageId);
 
-      // swallow immediate echo on this client only
-      if (recentlyProcessed(imageId)) {
-        console.log("[lights] swallowed as recent", imageId);
-        return;
-      }
-
-      // Placer bias: if I didn't just select this item, wait a bit
-      const iAmPlacer = iLikelyPlaced(imageId);
-      if (!iAmPlacer) {
-        await sleep(500); // ← tweak 300–700ms; 500ms is a good default
-      }
-
-      // cross-client dedupe
-      const claimed = await tryClaimLightLock(imageId);
-      if (!claimed) {
-        console.log("[lock-room] lost claim, skipping timer", imageId);
-        return;
-      }
-      console.log("[lock-room] won claim, creating timer", imageId);
-
-      // create the timer (still keep idempotence guard)
-      const { m, s, name } = inputsRef.current;
-      const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
-      const ownerName = await OBR.player.getName();
-      const ownerId = OBR.player.id;
-
-      await writeRoomTimers((prev) => {
-        if (prev.some((t) => t.lightId === imageId)) return prev;
-        return [
-          ...prev,
-          {
-            id: uuid(),
-            name: (name ?? "").trim() || "Light",
-            durationMs: totalSeconds * 1000,
-            offsetMs: 0,
-            pausedAt: undefined,
-            startAt: Date.now(),
-            ownerName,
-            ownerId,
-            lightId: imageId,
-          },
-        ];
-      });
+    // 1) local echo guard
+    if (recentlyProcessed(imageId)) {
+      console.log("[lights] swallowed as recent", imageId);
+      return;
     }
+
+    // 2) placer bias: others wait a bit longer *with jitter*
+    const iAmPlacer = iLikelyPlaced(imageId);
+    if (!iAmPlacer) {
+      await sleep(jitter(600, 300)); // non-placers: ~600–900ms
+    } else {
+      // even the placer yields a hair to let metadata propagate
+      await sleep(50);
+    }
+
+    // 3) try to claim room-lock
+    const claimed = await tryClaimLightLock(imageId);
+    if (!claimed) {
+      console.log("[lock-room] lost claim, skipping timer", imageId);
+      return;
+    }
+    console.log("[lock-room] won claim (provisional)", imageId);
+
+    // 4) **confirm** the claim after a short delay
+    //    (if another client wrote after us, we’ll back out here)
+    await sleep(iAmPlacer ? 80 : 200);
+    const confirmLocks = await readRoomLocks();
+    if (confirmLocks[imageId] !== claimed) {
+      console.log("[lock-room] lost on confirm, backing out", imageId);
+      return;
+    }
+    console.log("[lock-room] confirmed, creating timer", imageId);
+
+    // 5) create the timer (your existing code from here down)
+    const { m, s, name } = inputsRef.current;
+    const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
+    const ownerName = await OBR.player.getName();
+    const ownerId = OBR.player.id;
+
+    await writeRoomTimers((prev) => {
+      if (prev.some((t) => t.lightId === imageId)) return prev;
+      return [
+        ...prev,
+        {
+          id: uuid(),
+          name: (name ?? "").trim() || "Light",
+          durationMs: totalSeconds * 1000,
+          offsetMs: 0,
+          pausedAt: undefined,
+          startAt: Date.now(),
+          ownerName,
+          ownerId,
+          lightId: imageId,
+        },
+      ];
+    });
+  }
+
 
     const offItems = OBR.scene.items.onChange(async (items: Item[]) => {
       for (const it of items) {
@@ -656,7 +674,7 @@ async function clearLightLock(imageId: string) {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.28 (dynamic-fog metadata mode)
+        v1.0.29 (dynamic-fog metadata mode)
       </p>
     </div>
   );
