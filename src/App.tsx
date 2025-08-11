@@ -6,10 +6,8 @@ const NAMESPACE = "com.brian.shadowdark-torches";
 const META_KEY = `${NAMESPACE}/torch` as const;
 const ALERT_CHANNEL = `${NAMESPACE}/alerts`;
 const DYN_LIGHT_KEY = "rodeo.owlbear.dynamic-fog/light";
-const LINK_ROOM_KEY = `${NAMESPACE}/light-locks` as const;
 
 // === Types ===
-type LightLocks = Record<string, string>; // imageId -> claimId
 
 export type TorchState = {
   id?: string; // stable id for deletes & event tracking
@@ -32,9 +30,6 @@ export type PlayerRow = { id: string; name: string; torches: TorchState[]; isSel
 
 const DEFAULT: TorchState = { durationMs: 60 * 60 * 1000, offsetMs: 0 };
 
-function isLightLocks(x: unknown): x is LightLocks {
-  return !!x && typeof x === "object";
-}
 
 function now() { return Date.now(); }
 
@@ -206,57 +201,11 @@ export default function App() {
       ?? `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function iLikelyPlaced(imageId: string, windowMs = 1500) {
-    const at = selectedAtRef.current.get(imageId);
-    return !!at && (Date.now() - at) < windowMs;
-  }
-
   function sleep(ms: number) {
     return new Promise((res) => setTimeout(res, ms));
   }
 
-  function jitter(ms: number, spread = 200) {
-    return ms + Math.floor(Math.random() * spread);
-  }
 
-async function readRoomLocks(): Promise<LightLocks> {
-  const meta = await OBR.room.getMetadata();
-  const raw = (meta as Record<string, unknown>)[LINK_ROOM_KEY];
-  return isLightLocks(raw) ? (raw as LightLocks) : {};
-}
-
-async function writeRoomLocks(mut: (prev: LightLocks) => LightLocks): Promise<LightLocks> {
-  const prev = await readRoomLocks();
-  const next = mut({ ...prev });
-  await OBR.room.setMetadata({ [LINK_ROOM_KEY]: next });
-  return next;
-}
-
-// Try to claim the right to create a timer for this IMAGE.
-// Returns the claim id if we won, undefined if someone else already claimed.
-async function tryClaimLightLock(imageId: string): Promise<string | undefined> {
-  const claimId = uuid();
-  console.log("[lock-room] attempt", { imageId, claimId });
-
-  await writeRoomLocks((locks) => {
-    if (!locks[imageId]) locks[imageId] = claimId; // only set if absent
-    return locks;
-  });
-
-  // Read back to see who actually holds it (handles races; last writer wins)
-  const after = await readRoomLocks();
-  const current = after[imageId];
-  console.log("[lock-room] read-back", { imageId, current, mine: claimId });
-
-  return current === claimId ? claimId : undefined;
-}
-
-async function clearLightLock(imageId: string) {
-  await writeRoomLocks((locks) => {
-    if (locks[imageId]) delete locks[imageId];
-    return locks;
-  });
-}
 
   async function refresh() {
     const selfId = OBR.player.id;
@@ -289,6 +238,16 @@ async function clearLightLock(imageId: string) {
 
     setRows(Array.from(rowsMap.values()));
   }
+
+  async function getItemSafe(imageId: string) {
+    try {
+      const items = await OBR.scene.items.getItems([imageId]); // pass an array of IDs
+      return items[0]; // will be undefined if not found
+    } catch {
+      return undefined;
+    }
+  }
+
 
   // === Base effects ===
   // Watch my selection and timestamp NEW selections
@@ -349,47 +308,45 @@ async function clearLightLock(imageId: string) {
   async function ensureTimerForImage(imageId: string) {
     console.log("[lights] ensureTimerForImage start", imageId);
 
-    // 1) local echo guard
+    // 1) swallow double-fire (local + sync)
     if (recentlyProcessed(imageId)) {
       console.log("[lights] swallowed as recent", imageId);
       return;
     }
 
-    // 2) placer bias: others wait a bit longer *with jitter*
-    const iAmPlacer = iLikelyPlaced(imageId);
-    if (!iAmPlacer) {
-      await sleep(jitter(600, 300)); // non-placers: ~600–900ms
-    } else {
-      // even the placer yields a hair to let metadata propagate
-      await sleep(50);
-    }
+    // 2) Let Dynamic Fog finish batching its writes
+    await sleep(40);
 
-    // 3) try to claim room-lock
-    const claimed = await tryClaimLightLock(imageId);
-    if (!claimed) {
-      console.log("[lock-room] lost claim, skipping timer", imageId);
+    const selfId = OBR.player.id;
+    const itemA = await getItemSafe(imageId);
+    if (!itemA || itemA.lastModifiedUserId !== selfId) {
+      console.log("[lights] skip; not last modifier", { imageId, last: itemA?.lastModifiedUserId, selfId });
       return;
     }
-    console.log("[lock-room] won claim (provisional)", imageId);
 
-    // 4) **confirm** the claim after a short delay
-    //    (if another client wrote after us, we’ll back out here)
-    await sleep(iAmPlacer ? 80 : 200);
-    const confirmLocks = await readRoomLocks();
-    if (confirmLocks[imageId] !== claimed) {
-      console.log("[lock-room] lost on confirm, backing out", imageId);
+    // 3) Idempotency: bail if a timer for this light already exists
+    const existing = await readRoomTimers();
+    if (existing.some((t) => t.lightId === imageId)) {
+      console.log("[lights] timer already exists for", imageId);
       return;
     }
-    console.log("[lock-room] confirmed, creating timer", imageId);
 
-    // 5) create the timer (your existing code from here down)
+    // 4) Small confirm delay + re-check (reduces false attribution on rapid updates)
+    await sleep(50);
+    const itemB = await getItemSafe(imageId);
+    if (!itemB || itemB.lastModifiedUserId !== selfId) {
+      console.log("[lights] lost author check on confirm", { imageId, last: itemB?.lastModifiedUserId, selfId });
+      return;
+    }
+
+    // 5) Create the timer (keep your original creation logic – just ensure we write once)
     const { m, s, name } = inputsRef.current;
     const totalSeconds = Math.max(1, Math.floor(m) * 60 + Math.min(59, Math.max(0, Math.floor(s))));
     const ownerName = await OBR.player.getName();
     const ownerId = OBR.player.id;
 
     await writeRoomTimers((prev) => {
-      if (prev.some((t) => t.lightId === imageId)) return prev;
+      if (prev.some((t) => t.lightId === imageId)) return prev; // re-check inside txn
       return [
         ...prev,
         {
@@ -406,6 +363,7 @@ async function clearLightLock(imageId: string) {
       ];
     });
   }
+
 
 
     const offItems = OBR.scene.items.onChange(async (items: Item[]) => {
@@ -429,7 +387,6 @@ async function clearLightLock(imageId: string) {
           }
           if (removed.includes(DYN_LIGHT_KEY)) {
             await writeRoomTimers((prev) => prev.filter((t) => t.lightId !== it.id));
-            await clearLightLock(it.id); // allow future re-lights on this image
           }
         }
 
@@ -498,7 +455,7 @@ async function clearLightLock(imageId: string) {
               if (isRoomTimer(torch) && torch.lightId) {
                 // Optional: also remove the fog light
                 // await removeDynamicLightFlag(torch.lightId);
-                await clearLightLock(torch.lightId);
+                //await clearLightLock(torch.lightId);
               }
               await writeRoomTimers((prev) => prev.filter((t) => t.id !== torch.id));
             })();
