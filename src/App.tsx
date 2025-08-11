@@ -263,6 +263,8 @@ export default function App() {
       await OBR.scene.items.updateItems([imageId], () => [
         { metadata: { [DYN_LIGHT_KEY]: undefined } },
       ]);
+      console.log("image metadata should be removed, checking ", imageId);
+      console.debug(OBR.scene.items.getItems([imageId]))
 
       return true;
     } catch {
@@ -656,7 +658,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.32 (dynamic-fog metadata mode)
+        v1.0.33 (dynamic-fog metadata mode)
       </p>
     </div>
   );
