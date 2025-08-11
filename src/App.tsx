@@ -253,7 +253,7 @@ export default function App() {
       const items = await OBR.scene.items.getItems([imageId]); // plural API
       const item = items[0];
       if (!item) return false; // image might have been deleted
-
+      console.log("image wasn't deleted, removing dynamic fog light", imageId);
       // If the light is already gone, treat as success
       if (!item.metadata || !(DYN_LIGHT_KEY in item.metadata)) return true;
 
@@ -265,6 +265,7 @@ export default function App() {
       return true;
     } catch {
       // If another client removed it first, that's fine
+      console.warn("[lights] failed to remove dynamic fog light for", imageId);
       return false;
     }
   }
@@ -472,8 +473,10 @@ export default function App() {
             );
 
             (async () => {
+
               if (isRoomTimer(torch) && torch.lightId) {
                 if (torch.lightId) {
+                  console.log("[lights] removing dynamic fog light for", torch.lightId);
                   await removeDynamicFogLight(torch.lightId); //remove the light
                 }
               }
@@ -651,7 +654,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.30 (dynamic-fog metadata mode)
+        v1.0.31 (dynamic-fog metadata mode)
       </p>
     </div>
   );
