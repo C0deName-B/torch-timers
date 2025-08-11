@@ -260,9 +260,13 @@ export default function App() {
       console.log("image wasn't deleted and light wasn't already gone, removing dynamic fog light", imageId);
       console.log(OBR.scene.items.getItems([imageId]))
       // Removing an item metadata key: set it to undefined via updateItems
-      await OBR.scene.items.updateItems([imageId], () => [
-        { metadata: { [DYN_LIGHT_KEY]: undefined } },
-      ]);
+      await OBR.scene.items.updateItems([imageId], (items) =>
+      items.map((it) => {
+        const meta = { ...(it.metadata ?? {}) } as Record<string, unknown>;
+        delete meta[DYN_LIGHT_KEY];
+        return { ...it, metadata: meta };
+      })
+    );
       console.log("image metadata should be removed, checking ", imageId);
       console.debug(OBR.scene.items.getItems([imageId]))
 
@@ -658,7 +662,7 @@ export default function App() {
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
         Everyone is alerted when a light source diminishes. <br />
-        v1.0.33 (dynamic-fog metadata mode)
+        v1.0.34 (dynamic-fog metadata mode)
       </p>
     </div>
   );
